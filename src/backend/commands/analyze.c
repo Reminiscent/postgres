@@ -35,6 +35,7 @@
 #include "common/pg_prng.h"
 #include "executor/executor.h"
 #include "foreign/fdwapi.h"
+#include "lib/simplehash.h"
 #include "miscadmin.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_oper.h"
@@ -54,6 +55,7 @@
 #include "utils/sortsupport.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
+#include "utils/typcache.h"
 
 
 /* Per-index data for ANALYZE */
@@ -1888,6 +1890,69 @@ static int	analyze_mcv_list(int *mcv_counts,
 							 int samplerows,
 							 double totalrows);
 
+#define ANALYZE_HASH_THRESHOLD 200
+
+typedef struct DistinctHashEntry
+{
+	Datum		value;
+	int			index;
+	uint32		hash;
+	char		status;
+} DistinctHashEntry;
+
+typedef struct DistinctHashContext
+{
+	FmgrInfo   *cmpfunc;
+	FmgrInfo   *hashfunc;
+	Oid			collation;
+} DistinctHashContext;
+
+typedef struct DistinctHash_hash DistinctHash_hash;
+
+static uint32 distinct_hash_hash(DistinctHash_hash *tab, Datum key);
+static bool distinct_hash_equal(DistinctHash_hash *tab, Datum key0, Datum key1);
+
+#define SH_PREFIX				DistinctHash
+#define SH_ELEMENT_TYPE			DistinctHashEntry
+#define SH_KEY_TYPE				Datum
+#define SH_KEY					value
+#define SH_HASH_KEY(tab, key)	distinct_hash_hash(tab, key)
+#define SH_EQUAL(tab, key0, key1) distinct_hash_equal(tab, key0, key1)
+#define SH_SCOPE				static inline
+#define SH_STORE_HASH
+#define SH_GET_HASH(tab, ent)	((ent)->hash)
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
+static uint32
+distinct_hash_hash(DistinctHash_hash *tab, Datum key)
+{
+	DistinctHashContext *context = (DistinctHashContext *) tab->private_data;
+	Datum		result;
+
+	result = FunctionCall1Coll(context->hashfunc, context->collation, key);
+	return DatumGetUInt32(result);
+}
+
+static bool
+distinct_hash_equal(DistinctHash_hash *tab, Datum key0, Datum key1)
+{
+	DistinctHashContext *context = (DistinctHashContext *) tab->private_data;
+	Datum		result;
+
+	result = FunctionCall2Coll(context->cmpfunc, context->collation, key0, key1);
+	return DatumGetBool(result);
+}
+
+static inline void
+distinct_hash_set_index(DistinctHash_hash *hash, Datum value, int index)
+{
+	DistinctHashEntry *entry = DistinctHash_lookup(hash, value);
+
+	if (entry != NULL)
+		entry->index = index;
+}
 
 /*
  * std_typanalyze -- the default type-specific typanalyze function
@@ -2076,6 +2141,7 @@ compute_distinct_stats(VacAttrStatsP stats,
 	bool		is_varwidth = (!stats->attrtype->typbyval &&
 							   stats->attrtype->typlen < 0);
 	FmgrInfo	f_cmpeq;
+	TypeCacheEntry *typentry;
 	typedef struct
 	{
 		Datum		value;
@@ -2085,6 +2151,10 @@ compute_distinct_stats(VacAttrStatsP stats,
 	int			track_cnt,
 				track_max;
 	int			num_mcv = stats->attstattarget;
+	int			firstcount1 = 0;
+	bool		use_hash;
+	DistinctHashContext hash_context;
+	DistinctHash_hash *track_hash = NULL;
 	StdAnalyzeData *mystats = (StdAnalyzeData *) stats->extra_data;
 
 	/*
@@ -2097,14 +2167,33 @@ compute_distinct_stats(VacAttrStatsP stats,
 	track_cnt = 0;
 
 	fmgr_info(mystats->eqfunc, &f_cmpeq);
+	typentry = lookup_type_cache(stats->attrtypid,
+								 TYPECACHE_HASH_PROC_FINFO | TYPECACHE_EQ_OPR);
+
+	/*
+	 * For sufficiently large statistics targets, use a hash table to avoid
+	 * repeated linear searches of the track[] array, but only when we can use
+	 * the type's default hash support that matches the equality operator.
+	 */
+	use_hash = (track_max >= ANALYZE_HASH_THRESHOLD &&
+				OidIsValid(mystats->eqfunc) &&
+				mystats->eqopr == typentry->eq_opr &&
+				OidIsValid(typentry->hash_proc));
+	if (use_hash)
+	{
+		hash_context.cmpfunc = &f_cmpeq;
+		hash_context.hashfunc = &typentry->hash_proc_finfo;
+		hash_context.collation = stats->attrcollid;
+		track_hash = DistinctHash_create(CurrentMemoryContext,
+										 track_max, &hash_context);
+	}
 
 	for (i = 0; i < samplerows; i++)
 	{
 		Datum		value;
 		bool		isnull;
 		bool		match;
-		int			firstcount1,
-					j;
+		int			j = 0;
 
 		vacuum_delay_point(true);
 
@@ -2151,19 +2240,34 @@ compute_distinct_stats(VacAttrStatsP stats,
 		/*
 		 * See if the value matches anything we're already tracking.
 		 */
-		match = false;
-		firstcount1 = track_cnt;
-		for (j = 0; j < track_cnt; j++)
+		if (use_hash)
 		{
-			if (DatumGetBool(FunctionCall2Coll(&f_cmpeq,
-											   stats->attrcollid,
-											   value, track[j].value)))
+			DistinctHashEntry *entry;
+
+			entry = DistinctHash_lookup(track_hash, value);
+			match = (entry != NULL);
+			if (match)
+				j = entry->index;
+		}
+		else
+		{
+			int			firstcount1_local = track_cnt;
+
+			match = false;
+			for (j = 0; j < track_cnt; j++)
 			{
-				match = true;
-				break;
+				if (DatumGetBool(FunctionCall2Coll(&f_cmpeq,
+												   stats->attrcollid,
+												   value, track[j].value)))
+				{
+					match = true;
+					break;
+				}
+				if (j < firstcount1_local && track[j].count == 1)
+					firstcount1_local = j;
 			}
-			if (j < firstcount1 && track[j].count == 1)
-				firstcount1 = j;
+
+			firstcount1 = firstcount1_local;
 		}
 
 		if (match)
@@ -2175,23 +2279,46 @@ compute_distinct_stats(VacAttrStatsP stats,
 			{
 				swapDatum(track[j].value, track[j - 1].value);
 				swapInt(track[j].count, track[j - 1].count);
+				if (use_hash)
+				{
+					distinct_hash_set_index(track_hash, track[j].value, j);
+					distinct_hash_set_index(track_hash, track[j - 1].value, j - 1);
+				}
 				j--;
 			}
+			while (use_hash && firstcount1 < track_cnt &&
+				   track[firstcount1].count > 1)
+				firstcount1++;
 		}
 		else
 		{
 			/* No match.  Insert at head of count-1 list */
 			if (track_cnt < track_max)
 				track_cnt++;
+			else if (use_hash && firstcount1 >= track_cnt)
+				continue;
+			else if (use_hash)
+				DistinctHash_delete(track_hash, track[track_cnt - 1].value);
 			for (j = track_cnt - 1; j > firstcount1; j--)
 			{
 				track[j].value = track[j - 1].value;
 				track[j].count = track[j - 1].count;
+				if (use_hash)
+					distinct_hash_set_index(track_hash, track[j].value, j);
 			}
 			if (firstcount1 < track_cnt)
 			{
 				track[firstcount1].value = value;
 				track[firstcount1].count = 1;
+				if (use_hash)
+				{
+					bool		found_hash;
+					DistinctHashEntry *entry;
+
+					entry = DistinctHash_insert(track_hash, value, &found_hash);
+					Assert(!found_hash);
+					entry->index = firstcount1;
+				}
 			}
 		}
 	}
