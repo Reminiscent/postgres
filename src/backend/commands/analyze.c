@@ -2379,10 +2379,10 @@ compute_distinct_stats(VacAttrStatsP stats,
 			}
 
 			/*
-			 * In hash mode, a promoted singleton advances the first singleton
-			 * boundary by one slot.
+			 * In hash mode, keep firstcount1 at the first singleton boundary.
 			 */
-			if (use_hash && was_count1 && j <= firstcount1)
+			while (use_hash && firstcount1 < track_cnt &&
+				   track[firstcount1].count > 1)
 				firstcount1++;
 
 			/*
