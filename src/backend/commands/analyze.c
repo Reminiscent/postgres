@@ -55,6 +55,7 @@
 #include "utils/sortsupport.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
+#include "utils/typcache.h"
 
 
 /* Per-index data for ANALYZE */
@@ -1941,6 +1942,75 @@ static int	analyze_mcv_list(int *mcv_counts,
 							 int samplerows,
 							 double totalrows);
 
+/*
+ * Build a hash table for distinct/MCV tracking only when the statistics
+ * target is large enough to justify the overhead of maintaining it.
+ */
+#define ANALYZE_HASH_THRESHOLD  100
+
+typedef struct DistinctHashEntry
+{
+	Datum		value;
+	int			index;
+	uint32		hash;
+	char		status;
+}			DistinctHashEntry;
+
+typedef struct DistinctHashContext
+{
+	FmgrInfo   *cmpfunc;
+	FmgrInfo   *hashfunc;
+	Oid			collation;
+}			DistinctHashContext;
+
+typedef struct DistinctHash_hash DistinctHash_hash;
+
+static uint32 distinct_hash_hash(DistinctHash_hash * tab, Datum key);
+static bool distinct_hash_equal(DistinctHash_hash * tab, Datum key0, Datum key1);
+
+#define SH_PREFIX DistinctHash
+#define SH_ELEMENT_TYPE DistinctHashEntry
+#define SH_KEY_TYPE Datum
+#define SH_KEY value
+#define SH_HASH_KEY(tab, key) distinct_hash_hash(tab, key)
+#define SH_EQUAL(tab, key0, key1) distinct_hash_equal(tab, key0, key1)
+#define SH_SCOPE static inline
+#define SH_STORE_HASH
+#define SH_GET_HASH(tab, ent) ((ent)->hash)
+#define SH_DEFINE
+#define SH_DECLARE
+#include "lib/simplehash.h"
+
+static uint32
+distinct_hash_hash(DistinctHash_hash * tab, Datum key)
+{
+	DistinctHashContext *context = (DistinctHashContext *) tab->private_data;
+	Datum		result;
+
+	result = FunctionCall1Coll(context->hashfunc, context->collation, key);
+	return DatumGetUInt32(result);
+}
+
+static bool
+distinct_hash_equal(DistinctHash_hash * tab, Datum key0, Datum key1)
+{
+	DistinctHashContext *context = (DistinctHashContext *) tab->private_data;
+	Datum		result;
+
+	result = FunctionCall2Coll(context->cmpfunc, context->collation, key0, key1);
+	return DatumGetBool(result);
+}
+
+static inline void
+distinct_hash_set_index(DistinctHash_hash * hash, Datum value,
+						uint32 value_hash, int index)
+{
+	DistinctHashEntry *entry = DistinctHash_lookup_hash(hash, value, value_hash);
+
+	Assert(entry != NULL);
+	entry->index = index;
+}
+
 
 /*
  * std_typanalyze -- the default type-specific typanalyze function
@@ -2108,10 +2178,14 @@ compute_trivial_stats(VacAttrStatsP stats,
  *
  *	The most common values are determined by brute force: we keep a list
  *	of previously seen values, ordered by number of times seen, as we scan
- *	the samples.  A newly seen value is inserted just after the last
- *	multiply-seen value, causing the bottommost (oldest) singly-seen value
- *	to drop off the list.  The accuracy of this method, and also its cost,
- *	depend mainly on the length of the list we are willing to keep.
+ *	the samples.  Newly seen values are appended to the list, and when it's
+ *	full we replace the oldest singly-seen value (FIFO) using a round-robin
+ *	cursor (clock hand) over the count=1 region.  This avoids repeatedly
+ *	shifting the count=1 region and, when hashing is enabled, avoids having
+ *	to update a large number of hash->index mappings.
+ *
+ *	The accuracy of this method, and also its cost, depend mainly on the
+ *	length of the list we are willing to keep.
  */
 static void
 compute_distinct_stats(VacAttrStatsP stats,
@@ -2129,15 +2203,22 @@ compute_distinct_stats(VacAttrStatsP stats,
 	bool		is_varwidth = (!stats->attrtype->typbyval &&
 							   stats->attrtype->typlen < 0);
 	FmgrInfo	f_cmpeq;
+	TypeCacheEntry *typentry;
 	typedef struct
 	{
 		Datum		value;
 		int			count;
+		uint32		hash;
 	} TrackItem;
 	TrackItem  *track;
 	int			track_cnt,
 				track_max;
 	int			num_mcv = stats->attstattarget;
+	int			firstcount1 = 0;	/* index of first singleton in track[] */
+	int			c1_cursor = 0;	/* next singleton to evict (FIFO) */
+	bool		use_hash;
+	DistinctHashContext hash_context;
+	DistinctHash_hash *track_hash = NULL;
 	StdAnalyzeData *mystats = (StdAnalyzeData *) stats->extra_data;
 
 	/*
@@ -2150,14 +2231,33 @@ compute_distinct_stats(VacAttrStatsP stats,
 	track_cnt = 0;
 
 	fmgr_info(mystats->eqfunc, &f_cmpeq);
+	typentry = lookup_type_cache(stats->attrtypid,
+								 TYPECACHE_HASH_PROC_FINFO | TYPECACHE_EQ_OPR);
+
+	/*
+	 * For sufficiently large statistics targets, use a hash table to avoid
+	 * repeated linear searches of the track[] array, but only when we can use
+	 * the type's default hash support that matches the equality operator.
+	 */
+	use_hash = (num_mcv >= ANALYZE_HASH_THRESHOLD &&
+				mystats->eqopr == typentry->eq_opr &&
+				OidIsValid(typentry->hash_proc));
+	if (use_hash)
+	{
+		hash_context.cmpfunc = &f_cmpeq;
+		hash_context.hashfunc = &typentry->hash_proc_finfo;
+		hash_context.collation = stats->attrcollid;
+		track_hash = DistinctHash_create(CurrentMemoryContext, track_max,
+										 &hash_context);
+	}
 
 	for (i = 0; i < samplerows; i++)
 	{
 		Datum		value;
 		bool		isnull;
 		bool		match;
-		int			firstcount1,
-					j;
+		int			j = 0;
+		uint32		value_hash = 0;
 
 		vacuum_delay_point(true);
 
@@ -2204,47 +2304,150 @@ compute_distinct_stats(VacAttrStatsP stats,
 		/*
 		 * See if the value matches anything we're already tracking.
 		 */
-		match = false;
-		firstcount1 = track_cnt;
-		for (j = 0; j < track_cnt; j++)
+		if (use_hash)
 		{
-			if (DatumGetBool(FunctionCall2Coll(&f_cmpeq,
-											   stats->attrcollid,
-											   value, track[j].value)))
+			DistinctHashEntry *entry;
+
+			value_hash = distinct_hash_hash(track_hash, value);
+			entry = DistinctHash_lookup_hash(track_hash, value, value_hash);
+			match = (entry != NULL);
+			if (match)
+				j = entry->index;
+		}
+		else
+		{
+			match = false;
+			firstcount1 = track_cnt;
+			for (j = 0; j < track_cnt; j++)
 			{
-				match = true;
-				break;
+				if (DatumGetBool(FunctionCall2Coll(&f_cmpeq,
+												   stats->attrcollid,
+												   value, track[j].value)))
+				{
+					match = true;
+					break;
+				}
+				if (j < firstcount1 && track[j].count == 1)
+					firstcount1 = j;
 			}
-			if (j < firstcount1 && track[j].count == 1)
-				firstcount1 = j;
 		}
 
 		if (match)
 		{
+			bool		was_count1;
+			int			match_index = j;
+
 			/* Found a match */
+			was_count1 = (track[j].count == 1);
 			track[j].count++;
 			/* This value may now need to "bubble up" in the track list */
 			while (j > 0 && track[j].count > track[j - 1].count)
 			{
 				swapDatum(track[j].value, track[j - 1].value);
 				swapInt(track[j].count, track[j - 1].count);
+				if (use_hash)
+				{
+					uint32		tmp;
+
+					tmp = track[j].hash;
+					track[j].hash = track[j - 1].hash;
+					track[j - 1].hash = tmp;
+					distinct_hash_set_index(track_hash, track[j].value,
+											track[j].hash, j);
+					distinct_hash_set_index(track_hash, track[j - 1].value,
+											track[j - 1].hash, j - 1);
+				}
 				j--;
 			}
+
+			/*
+			 * When a singleton becomes multiply-seen, bubble-up swaps move it
+			 * into the count>1 prefix and shift the preceding singletons
+			 * track[firstcount1..match_index-1] right by one.
+			 *
+			 * If c1_cursor points to a shifted singleton, or to the promoted
+			 * singleton itself (match_index), advance it so FIFO eviction
+			 * matches the original shift-based behavior.
+			 */
+			if (was_count1 &&
+				c1_cursor >= firstcount1 &&
+				c1_cursor <= match_index)
+			{
+				c1_cursor++;
+				if (c1_cursor >= track_cnt)
+					c1_cursor = firstcount1 + 1;
+			}
+
+			/*
+			 * In hash mode, a promoted singleton advances the first singleton
+			 * boundary by one slot.
+			 */
+			if (use_hash && was_count1 && j <= firstcount1)
+				firstcount1++;
+
+			/*
+			 * In hash mode, bubble-up may promote a singleton out of the
+			 * count=1 region and advance firstcount1, so c1_cursor might now
+			 * point into the count>1 prefix.
+			 */
+			if (use_hash && c1_cursor < firstcount1)
+				c1_cursor = firstcount1;
 		}
 		else
 		{
-			/* No match.  Insert at head of count-1 list */
+			int			insert_index;
+
+			/*
+			 * No match.  Track a single-occurrence value if we have a slot.
+			 * If we're full, evict the oldest singleton (FIFO) from the
+			 * count=1 region (track[firstcount1..track_cnt-1]) while leaving
+			 * the multiply-seen items intact, rather than shifting the array.
+			 */
 			if (track_cnt < track_max)
-				track_cnt++;
-			for (j = track_cnt - 1; j > firstcount1; j--)
+				insert_index = track_cnt++;
+			else if (firstcount1 < track_cnt)
 			{
-				track[j].value = track[j - 1].value;
-				track[j].count = track[j - 1].count;
+				/*
+				 * Match the old shift-based FIFO eviction without O(n)
+				 * shifting by treating the count=1 region as a ring and
+				 * advancing a round-robin cursor (clock hand) over it.
+				 */
+				/*
+				 * Bubble-up promotions can advance firstcount1; keep
+				 * c1_cursor within the count=1 region.
+				 */
+				if (c1_cursor < firstcount1 || c1_cursor >= track_cnt)
+					c1_cursor = firstcount1;
+				insert_index = c1_cursor++;
+				if (c1_cursor >= track_cnt)
+					c1_cursor = firstcount1;
+
+				if (use_hash)
+				{
+					DistinctHashEntry *delentry;
+
+					delentry = DistinctHash_lookup_hash(track_hash,
+														track[insert_index].value,
+														track[insert_index].hash);
+					Assert(delentry != NULL);
+					DistinctHash_delete_item(track_hash, delentry);
+				}
 			}
-			if (firstcount1 < track_cnt)
+			else
+				continue;
+
+			track[insert_index].value = value;
+			track[insert_index].count = 1;
+			if (use_hash)
 			{
-				track[firstcount1].value = value;
-				track[firstcount1].count = 1;
+				bool		found_hash;
+				DistinctHashEntry *entry;
+
+				track[insert_index].hash = value_hash;
+				entry = DistinctHash_insert_hash(track_hash, value, value_hash,
+												 &found_hash);
+				Assert(!found_hash);
+				entry->index = insert_index;
 			}
 		}
 	}
