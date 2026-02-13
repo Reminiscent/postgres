@@ -198,6 +198,17 @@ default for type myint using hash as
 create table inttest (a myint);
 insert into inttest values(1::myint),(null);
 
+-- scalar NULL with a non-strict operator still requires per-element checks.
+-- With no NULLs on the right side, IN and NOT IN should both yield NULL.
+select (a in (0::myint,1::myint,2::myint,3::myint,4::myint,5::myint,6::myint,7::myint,8::myint,9::myint)) is null
+from inttest where a is null;
+select (a in (0::myint,1::myint,2::myint,3::myint,4::myint,5::myint)) is null
+from inttest where a is null;
+select (a not in (0::myint,1::myint,2::myint,3::myint,4::myint,5::myint,6::myint,7::myint,8::myint,9::myint)) is null
+from inttest where a is null;
+select (a not in (0::myint,1::myint,2::myint,3::myint,4::myint,5::myint)) is null
+from inttest where a is null;
+
 -- try an array with enough elements to cause hashing
 select * from inttest where a in (1::myint,2::myint,3::myint,4::myint,5::myint,6::myint,7::myint,8::myint,9::myint, null);
 select * from inttest where a not in (1::myint,2::myint,3::myint,4::myint,5::myint,6::myint,7::myint,8::myint,9::myint, null);

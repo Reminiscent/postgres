@@ -4243,12 +4243,99 @@ ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op, ExprContext *eco
 	Assert(!*op->resnull);
 
 	/*
-	 * If the scalar is NULL, and the function is strict, return NULL; no
-	 * point in executing the search.
+	 * If the scalar is NULL, we can only use the hash table with strict
+	 * functions.  For non-strict functions we must evaluate each element to
+	 * preserve SQL's three-valued logic; probing the hash table would also
+	 * depend on the NULL lhs Datum payload, whose value is not meaningful.
 	 */
-	if (fcinfo->args[0].isnull && strictfunc)
+	if (scalar_isnull)
 	{
-		*op->resnull = true;
+		ArrayType  *arr;
+		int16		typlen;
+		bool		typbyval;
+		char		typalign;
+		uint8		typalignby;
+		int			nitems;
+		char	   *s;
+		uint8	   *bitmap;
+		int			bitmask;
+
+		if (strictfunc)
+		{
+			*op->resnull = true;
+			return;
+		}
+
+		arr = DatumGetArrayTypeP(*op->resvalue);
+
+		get_typlenbyvalalign(ARR_ELEMTYPE(arr),
+							 &typlen,
+							 &typbyval,
+							 &typalign);
+		typalignby = typalign_to_alignby(typalign);
+
+		nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+
+		/* Compute IN as an OR reduction of equality results. */
+		result = BoolGetDatum(false);
+		resultnull = false;
+
+		fcinfo->args[0].value = (Datum) 0;
+		fcinfo->args[0].isnull = true;
+
+		s = (char *) ARR_DATA_PTR(arr);
+		bitmap = ARR_NULLBITMAP(arr);
+		bitmask = 1;
+		for (int i = 0; i < nitems; i++)
+		{
+			Datum		elt;
+			Datum		thisresult;
+
+			/* Get array element, checking for NULL. */
+			if (bitmap && (*bitmap & bitmask) == 0)
+			{
+				fcinfo->args[1].value = (Datum) 0;
+				fcinfo->args[1].isnull = true;
+			}
+			else
+			{
+				elt = fetch_att(s, typbyval, typlen);
+				s = att_addlength_pointer(s, typlen, s);
+				s = (char *) att_nominal_alignby(s, typalignby);
+				fcinfo->args[1].value = elt;
+				fcinfo->args[1].isnull = false;
+			}
+
+			fcinfo->isnull = false;
+			thisresult = op->d.hashedscalararrayop.finfo->fn_addr(fcinfo);
+
+			if (fcinfo->isnull)
+				resultnull = true;
+			else if (DatumGetBool(thisresult))
+			{
+				result = BoolGetDatum(true);
+				resultnull = false;
+				break;
+			}
+
+			/* Advance bitmap pointer if any. */
+			if (bitmap)
+			{
+				bitmask <<= 1;
+				if (bitmask == 0x100)
+				{
+					bitmap++;
+					bitmask = 1;
+				}
+			}
+		}
+
+		/* Reverse for NOT IN; NULL stays NULL. */
+		if (!inclause && !resultnull)
+			result = BoolGetDatum(!DatumGetBool(result));
+
+		*op->resvalue = result;
+		*op->resnull = resultnull;
 		return;
 	}
 
