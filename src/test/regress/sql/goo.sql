@@ -49,6 +49,7 @@ ANALYZE;
 
 -- Verify combined is the default strategy.
 SHOW goo_greedy_strategy;
+SHOW join_search_effort;
 
 --
 -- Basic 3-way join (sanity check)

@@ -19,5 +19,7 @@
 
 extern RelOptInfo *goo_join_search(PlannerInfo *root, int levels_needed,
 								   List *initial_rels);
+extern RelOptInfo *hybrid_join_search(PlannerInfo *root, int levels_needed,
+									  List *initial_rels);
 
 #endif							/* GOO_H */

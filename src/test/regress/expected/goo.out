@@ -50,6 +50,12 @@ SHOW goo_greedy_strategy;
  combined
 (1 row)
 
+SHOW join_search_effort;
+ join_search_effort 
+--------------------
+ 5
+(1 row)
+
 --
 -- Basic 3-way join (sanity check)
 --
@@ -98,13 +104,13 @@ WHERE t1.a = 1 AND t2.c = 2 AND t5.f = 3;
 -------------------------------------
  Aggregate
    ->  Nested Loop
-         ->  Seq Scan on t5
-               Filter: (f = 3)
          ->  Nested Loop
                ->  Seq Scan on t1
                      Filter: (a = 1)
                ->  Seq Scan on t2
                      Filter: (c = 2)
+         ->  Seq Scan on t5
+               Filter: (f = 3)
 (9 rows)
 
 SELECT count(*)
@@ -139,8 +145,8 @@ JOIN dim2 ON fact.dim2_id = dim2.id
 JOIN dim3 ON fact.dim3_id = dim3.id
 JOIN dim4 ON fact.dim4_id = dim4.id
 WHERE dim1.id < 5;
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
  Aggregate
    ->  Nested Loop
          Join Filter: (fact.dim4_id = dim4.id)
@@ -149,15 +155,15 @@ WHERE dim1.id < 5;
                ->  Seq Scan on dim3
                ->  Hash
                      ->  Hash Join
-                           Hash Cond: (fact.dim1_id = dim1.id)
-                           ->  Hash Join
-                                 Hash Cond: (fact.dim2_id = dim2.id)
-                                 ->  Seq Scan on fact
-                                 ->  Hash
-                                       ->  Seq Scan on dim2
+                           Hash Cond: (dim2.id = fact.dim2_id)
+                           ->  Seq Scan on dim2
                            ->  Hash
-                                 ->  Seq Scan on dim1
-                                       Filter: (id < 5)
+                                 ->  Hash Join
+                                       Hash Cond: (fact.dim1_id = dim1.id)
+                                       ->  Seq Scan on fact
+                                       ->  Hash
+                                             ->  Seq Scan on dim1
+                                                   Filter: (id < 5)
          ->  Seq Scan on dim4
 (18 rows)
 
@@ -184,66 +190,66 @@ JOIN t12 ON t10.k = t12.k
 JOIN t13 ON t11.l = t13.l
 JOIN t14 ON t12.m = t14.m
 JOIN t15 ON t13.n = t15.n;
-                                    QUERY PLAN                                    
-----------------------------------------------------------------------------------
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
  Aggregate
    ->  Hash Join
-         Hash Cond: (t7.h = t9.h)
+         Hash Cond: (t13.n = t15.n)
          ->  Hash Join
-               Hash Cond: (t8.i = t10.i)
-               ->  Hash Join
-                     Hash Cond: (t6.g = t8.g)
-                     ->  Hash Join
-                           Hash Cond: (t5.f = t7.f)
-                           ->  Hash Join
-                                 Hash Cond: (t4.e = t6.e)
-                                 ->  Hash Join
-                                       Hash Cond: (t3.d = t5.d)
-                                       ->  Hash Join
-                                             Hash Cond: (t2.c = t4.c)
-                                             ->  Hash Join
-                                                   Hash Cond: (t1.b = t3.b)
-                                                   ->  Hash Join
-                                                         Hash Cond: (t1.a = t2.a)
-                                                         ->  Seq Scan on t1
-                                                         ->  Hash
-                                                               ->  Seq Scan on t2
-                                                   ->  Hash
-                                                         ->  Seq Scan on t3
-                                             ->  Hash
-                                                   ->  Seq Scan on t4
-                                       ->  Hash
-                                             ->  Seq Scan on t5
-                                 ->  Hash
-                                       ->  Seq Scan on t6
-                           ->  Hash
-                                 ->  Seq Scan on t7
-                     ->  Hash
-                           ->  Seq Scan on t8
-               ->  Hash
-                     ->  Hash Join
-                           Hash Cond: (t12.m = t14.m)
-                           ->  Hash Join
-                                 Hash Cond: (t10.k = t12.k)
-                                 ->  Seq Scan on t10
-                                 ->  Hash
-                                       ->  Seq Scan on t12
-                           ->  Hash
-                                 ->  Seq Scan on t14
-         ->  Hash
+               Hash Cond: (t12.m = t14.m)
                ->  Hash Join
                      Hash Cond: (t11.l = t13.l)
                      ->  Hash Join
-                           Hash Cond: (t9.j = t11.j)
-                           ->  Seq Scan on t9
-                           ->  Hash
-                                 ->  Seq Scan on t11
-                     ->  Hash
+                           Hash Cond: (t10.k = t12.k)
                            ->  Hash Join
-                                 Hash Cond: (t13.n = t15.n)
-                                 ->  Seq Scan on t13
+                                 Hash Cond: (t9.j = t11.j)
+                                 ->  Hash Join
+                                       Hash Cond: (t8.i = t10.i)
+                                       ->  Hash Join
+                                             Hash Cond: (t7.h = t9.h)
+                                             ->  Hash Join
+                                                   Hash Cond: (t6.g = t8.g)
+                                                   ->  Hash Join
+                                                         Hash Cond: (t5.f = t7.f)
+                                                         ->  Hash Join
+                                                               Hash Cond: (t4.e = t6.e)
+                                                               ->  Hash Join
+                                                                     Hash Cond: (t3.d = t5.d)
+                                                                     ->  Hash Join
+                                                                           Hash Cond: (t2.c = t4.c)
+                                                                           ->  Hash Join
+                                                                                 Hash Cond: (t1.b = t3.b)
+                                                                                 ->  Hash Join
+                                                                                       Hash Cond: (t1.a = t2.a)
+                                                                                       ->  Seq Scan on t1
+                                                                                       ->  Hash
+                                                                                             ->  Seq Scan on t2
+                                                                                 ->  Hash
+                                                                                       ->  Seq Scan on t3
+                                                                           ->  Hash
+                                                                                 ->  Seq Scan on t4
+                                                                     ->  Hash
+                                                                           ->  Seq Scan on t5
+                                                               ->  Hash
+                                                                     ->  Seq Scan on t6
+                                                         ->  Hash
+                                                               ->  Seq Scan on t7
+                                                   ->  Hash
+                                                         ->  Seq Scan on t8
+                                             ->  Hash
+                                                   ->  Seq Scan on t9
+                                       ->  Hash
+                                             ->  Seq Scan on t10
                                  ->  Hash
-                                       ->  Seq Scan on t15
+                                       ->  Seq Scan on t11
+                           ->  Hash
+                                 ->  Seq Scan on t12
+                     ->  Hash
+                           ->  Seq Scan on t13
+               ->  Hash
+                     ->  Seq Scan on t14
+         ->  Hash
+               ->  Seq Scan on t15
 (58 rows)
 
 -- Execute to verify correctness
@@ -459,22 +465,22 @@ SELECT count(*)
 FROM t1 JOIN t2 ON t1.a = t2.a,
      t5 JOIN t6 ON t5.f = t6.e
 WHERE t1.a < 5 AND t5.d < 3;
-                   QUERY PLAN                    
--------------------------------------------------
+                      QUERY PLAN                       
+-------------------------------------------------------
  Aggregate
    ->  Hash Join
          Hash Cond: (t2.a = t1.a)
-         ->  Nested Loop
-               ->  Hash Join
-                     Hash Cond: (t6.e = t5.f)
-                     ->  Seq Scan on t6
-                     ->  Hash
-                           ->  Seq Scan on t5
-                                 Filter: (d < 3)
-               ->  Seq Scan on t2
+         ->  Seq Scan on t2
          ->  Hash
-               ->  Seq Scan on t1
-                     Filter: (a < 5)
+               ->  Nested Loop
+                     ->  Hash Join
+                           Hash Cond: (t6.e = t5.f)
+                           ->  Seq Scan on t6
+                           ->  Hash
+                                 ->  Seq Scan on t5
+                                       Filter: (d < 3)
+                     ->  Seq Scan on t1
+                           Filter: (a < 5)
 (14 rows)
 
 --
@@ -608,8 +614,8 @@ JOIN chain1c ON chain1b.val = chain1c.id
 JOIN chain2a ON chain1a.val = chain2a.id  -- Cross-chain join
 JOIN chain2b ON chain2a.val = chain2b.id
 JOIN chain2c ON chain2b.val = chain2c.id;
-                              QUERY PLAN                               
------------------------------------------------------------------------
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Aggregate
    ->  Hash Join
          Hash Cond: (chain2b.val = chain2c.id)
@@ -618,14 +624,14 @@ JOIN chain2c ON chain2b.val = chain2c.id;
                ->  Hash Join
                      Hash Cond: (chain1a.val = chain2a.id)
                      ->  Hash Join
-                           Hash Cond: (chain1b.id = chain1a.id)
+                           Hash Cond: (chain1b.val = chain1c.id)
                            ->  Hash Join
-                                 Hash Cond: (chain1b.val = chain1c.id)
-                                 ->  Seq Scan on chain1b
-                                 ->  Hash
-                                       ->  Seq Scan on chain1c
-                           ->  Hash
+                                 Hash Cond: (chain1a.id = chain1b.id)
                                  ->  Seq Scan on chain1a
+                                 ->  Hash
+                                       ->  Seq Scan on chain1b
+                           ->  Hash
+                                 ->  Seq Scan on chain1c
                      ->  Hash
                            ->  Seq Scan on chain2a
                ->  Hash

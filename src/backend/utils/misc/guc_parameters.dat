@@ -900,8 +900,8 @@
 
 /* WIP: for now keep this in QUERY_TUNING_GEQO group for testing convenience */
 { name => 'enable_goo_join_search', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
-  short_desc => 'Enables the planner\'s use of GOO join search for large join problems.',
-  long_desc => 'Greedy Operator Ordering (GOO) is a deterministic join search algorithm for queries with many relations.',
+  short_desc => 'Enables the planner\'s use of hybrid join search for large join problems.',
+  long_desc => 'Hybrid join search performs exact dynamic programming up to an approximate work budget and completes the search using GOO on selected seeds.',
   flags => 'GUC_EXPLAIN',
   variable => 'enable_goo_join_search',
   boot_val => 'false',
@@ -1553,6 +1553,16 @@
   boot_val => '8',
   min => '1',
   max => 'INT_MAX',
+},
+
+/* WIP: testing knob for the hybrid join search path */
+{ name => 'join_search_effort', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
+  short_desc => 'Hybrid join search: effort sets a GEQO-like approximate exact-search work budget.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'join_search_effort',
+  boot_val => 'DEFAULT_GEQO_EFFORT',
+  min => 'MIN_GEQO_EFFORT',
+  max => 'MAX_JOIN_SEARCH_EFFORT',
 },
 
 { name => 'krb_caseins_users', type => 'bool', context => 'PGC_SIGHUP', group => 'CONN_AUTH_AUTH',
