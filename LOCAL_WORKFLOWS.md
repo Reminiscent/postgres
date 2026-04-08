@@ -214,6 +214,51 @@ make -C src/test/isolation installcheck
 make -C doc/src/sgml html
 ```
 
+## Community and Literature Lookup
+
+Network access is allowed. `.claude/settings.json` allows `WebSearch`
+and `WebFetch` for every domain, so choose sources by judgment rather
+than by an allowlist.
+
+Principles:
+
+- Prefer primary sources: PostgreSQL mailing-list archives, CommitFest,
+  commits and their `Discussion:` links, and official docs; for external
+  evidence, the paper itself and vendor documentation. Treat blogs, Q&A
+  sites, and list mirrors as leads to a primary source, not as evidence.
+- Use `WebSearch` to locate a source, then `WebFetch` to read it. Use
+  `curl` with `grep` for large pages that only need filtering.
+- When a site blocks automated access, look for another copy of the
+  same primary source (arXiv, PVLDB, the conference site, an author
+  page) instead of citing from memory. If none can be reached, record
+  the claim as unverified.
+- Record every query and URL actually used in the task's `log.md`.
+
+Known pitfalls (verified 2026-11-12; re-check if behavior changes):
+
+- Commit `Discussion:` links use `https://postgr.es/m/<message-id>`,
+  which redirects across hosts; WebFetch does not follow it. Fetch
+  `https://www.postgresql.org/message-id/<message-id>` instead, or
+  `/message-id/flat/<message-id>` for the whole thread.
+- Archive search:
+  `https://www.postgresql.org/search/?m=1&q=<terms>&l=<list>&d=<days>&s=d`,
+  where `l` is `1` (pgsql-hackers), `13` (pgsql-performance), `8`
+  (pgsql-bugs), or `16` (pgsql-committers), `d=-1` means any time, and
+  `s=d` sorts newest first.
+- CommitFest search requires a login. Browse each commitfest page
+  `https://commitfest.postgresql.org/<id>/` instead; it lists every
+  entry and its status without a login, and the home page lists the
+  recent IDs. To extract entry titles:
+
+  ```bash
+  curl -s https://commitfest.postgresql.org/<id>/ \
+    | grep -oE 'href="/patch/[0-9]+/"[^>]*>[^<]+'
+  ```
+
+- `dl.acm.org`, `dblp.org`, `ieeexplore.ieee.org`, and the Semantic
+  Scholar website block automated access; the Semantic Scholar API is
+  often rate limited without a key.
+
 ## Benchmark Rule
 
 This file defines benchmark build profiles, not the workload itself.

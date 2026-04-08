@@ -111,6 +111,9 @@ Use supporting skills only when the task needs them:
 - `pg-debug-bugfix` for `investigate / bug-triage`
 - `pg-rationale-trace` when design history materially affects the answer
 - `pg-design-research` when external precedent or literature materially affects the design
+- `pg-opportunity-scout` when the task is to find and rank unclaimed,
+  landable improvement opportunities in the query compute layer rather
+  than to work on an already chosen change
 - `pg-patch-review-deep-dive` when a PostgreSQL patch review uses
   `discussion.txt` plus the current branch's changes relative to the `agent`
   base branch, and needs first-principles design review, regression validation,
@@ -205,6 +208,8 @@ Hot path:
 - `code_review.md`
 - `.agents/skills/pg-*`
 - `notes/tasks/_template/`
+- `.claude/settings.json`: Claude Code web-access permissions; lookup
+  principles and known pitfalls live in `LOCAL_WORKFLOWS.md`
 
 Cold path:
 

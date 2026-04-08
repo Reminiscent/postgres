@@ -40,6 +40,23 @@ Check:
 - Were lanes widened when the risk required it?
 - Do the tests prove the invariant rather than only the happy path?
 - For bug fixes, is there proof of failure and proof of fix, or an explicit explanation for why one of them is still missing?
+- For each added regression case, can the author name the specific invariant it
+  proves and the minimum bug-triggering dimensions it must preserve?
+- Has incidental setup, duplicate execution paths, and unrelated output been
+  removed without weakening that proof?
+- Is the expected output both deterministic and diagnostic, without depending
+  on incidental row order, plan shape, timing, locale, configuration, or
+  concurrently changing state?
+- If the test uses `ORDER BY`, does ordering belong to the assertion?  Do not
+  add it merely to stabilize output when it would hide a useful unordered plan
+  path.
+- Does the test comment explain the invariant or a non-obvious setup
+  constraint, rather than narrating the SQL?
+
+For regression tests, minimal means **minimum sufficient proof**, not minimum
+line count.  Reduce setup, actions, observables, and expected output
+independently.  Keep a dimension when removing it stops the pre-fix failure,
+changes the failure reason, or leaves a relevant branch unproved.
 
 Typical mappings:
 
@@ -64,6 +81,22 @@ Check:
 - Does the code fit surrounding PostgreSQL style and structure?
 - Are names precise and domain-accurate?
 - Do comments explain intent rather than restating the code?
+- Does each non-trivial comment state a fact that is both true now and likely
+  to remain useful after a local refactor: an invariant, reason, ownership or
+  lifetime rule, concurrency constraint, portability issue, or surprising
+  contract?
+- Could the same fact be expressed more reliably by a name, type, assertion,
+  or simpler control flow?  If so, prefer that and remove the comment.
+- Does any comment duplicate an enum, field type, nearby inline steps, or an
+  exhaustive list that will drift as the code grows?
+- Is every claim scoped and qualified no more broadly than the implementation
+  guarantees?  Check names, phases, lock state, error behavior, and
+  concurrency windows literally.
+- When concurrency, lifetime, or a non-obvious safety argument is involved,
+  does the comment explain the dangerous alternative and why the guard is
+  sufficient?  Brevity must not erase the proof.
+- Were stale or newly misleading nearby comments updated or removed with the
+  code change?
 - Is there unnecessary churn, dead code, or speculative abstraction?
 - Are formatting tools or generated-file updates handled when required?
 
