@@ -154,6 +154,12 @@ static TupleDesc get_cached_rowtype(Oid type_id, int32 typmod,
 									bool *changed);
 static void ExecEvalRowNullInt(ExprState *state, ExprEvalStep *op,
 							   ExprContext *econtext, bool checkisnull);
+static void ExecEvalArrayCompareReduce(FunctionCallInfo fcinfo,
+									   ArrayType *arr, int16 typlen,
+									   bool typbyval, char typalign,
+									   bool useOr,
+									   bool invert_nonnull_result,
+									   Datum *result, bool *resultnull);
 
 /* fast-path evaluation functions */
 static Datum ExecJustInnerVar(ExprState *state, ExprContext *econtext, bool *isnull);
@@ -4031,13 +4037,6 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 	int			nitems;
 	Datum		result;
 	bool		resultnull;
-	int16		typlen;
-	bool		typbyval;
-	char		typalign;
-	uint8		typalignby;
-	char	   *s;
-	uint8	   *bitmap;
-	int			bitmask;
 
 	/*
 	 * If the array is NULL then we return NULL --- it's not very meaningful
@@ -4086,14 +4085,49 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 		op->d.scalararrayop.element_type = ARR_ELEMTYPE(arr);
 	}
 
-	typlen = op->d.scalararrayop.typlen;
-	typbyval = op->d.scalararrayop.typbyval;
-	typalign = op->d.scalararrayop.typalign;
-	typalignby = typalign_to_alignby(typalign);
+	ExecEvalArrayCompareReduce(fcinfo,
+							   arr,
+							   op->d.scalararrayop.typlen,
+							   op->d.scalararrayop.typbyval,
+							   op->d.scalararrayop.typalign,
+							   useOr,
+							   false,
+							   &result,
+							   &resultnull);
+
+	*op->resvalue = result;
+	*op->resnull = resultnull;
+}
+
+/*
+ * Shared helper for ExecEvalScalarArrayOp() and the hashed NULL-lhs fallback.
+ * Callers must handle the scalar-NULL strict fast path before invoking this.
+ *
+ * The linear path passes the expression's comparison function and uses useOr
+ * to select OR or AND reduction.  The hashed NULL-lhs fallback instead passes
+ * the equality function used by hash probes, so NOT IN inverts non-NULL
+ * results after reduction.
+ */
+static void
+ExecEvalArrayCompareReduce(FunctionCallInfo fcinfo,
+						   ArrayType *arr, int16 typlen,
+						   bool typbyval, char typalign,
+						   bool useOr,
+						   bool invert_nonnull_result,
+						   Datum *result, bool *resultnull)
+{
+	uint8		typalignby = typalign_to_alignby(typalign);
+	int			nitems;
+	char	   *s;
+	uint8	   *bitmap;
+	int			bitmask;
+	bool		strictfunc = fcinfo->flinfo->fn_strict;
+
+	nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
 
 	/* Initialize result appropriately depending on useOr */
-	result = BoolGetDatum(!useOr);
-	resultnull = false;
+	*result = BoolGetDatum(!useOr);
+	*resultnull = false;
 
 	/* Loop over the array elements */
 	s = (char *) ARR_DATA_PTR(arr);
@@ -4129,18 +4163,18 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 		else
 		{
 			fcinfo->isnull = false;
-			thisresult = op->d.scalararrayop.fn_addr(fcinfo);
+			thisresult = fcinfo->flinfo->fn_addr(fcinfo);
 		}
 
 		/* Combine results per OR or AND semantics */
 		if (fcinfo->isnull)
-			resultnull = true;
+			*resultnull = true;
 		else if (useOr)
 		{
 			if (DatumGetBool(thisresult))
 			{
-				result = BoolGetDatum(true);
-				resultnull = false;
+				*result = BoolGetDatum(true);
+				*resultnull = false;
 				break;			/* needn't look at any more elements */
 			}
 		}
@@ -4148,8 +4182,8 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 		{
 			if (!DatumGetBool(thisresult))
 			{
-				result = BoolGetDatum(false);
-				resultnull = false;
+				*result = BoolGetDatum(false);
+				*resultnull = false;
 				break;			/* needn't look at any more elements */
 			}
 		}
@@ -4166,8 +4200,9 @@ ExecEvalScalarArrayOp(ExprState *state, ExprEvalStep *op)
 		}
 	}
 
-	*op->resvalue = result;
-	*op->resnull = resultnull;
+	/* Apply the caller-requested NOT IN inversion, preserving NULL. */
+	if (invert_nonnull_result && !*resultnull)
+		*result = BoolGetDatum(!DatumGetBool(*result));
 }
 
 /*
@@ -4254,11 +4289,6 @@ ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op, ExprContext *eco
 		int16		typlen;
 		bool		typbyval;
 		char		typalign;
-		uint8		typalignby;
-		int			nitems;
-		char	   *s;
-		uint8	   *bitmap;
-		int			bitmask;
 
 		if (strictfunc)
 		{
@@ -4272,67 +4302,19 @@ ExecEvalHashedScalarArrayOp(ExprState *state, ExprEvalStep *op, ExprContext *eco
 							 &typlen,
 							 &typbyval,
 							 &typalign);
-		typalignby = typalign_to_alignby(typalign);
-
-		nitems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
-
-		/* Compute IN as an OR reduction of equality results. */
-		result = BoolGetDatum(false);
-		resultnull = false;
 
 		fcinfo->args[0].value = (Datum) 0;
 		fcinfo->args[0].isnull = true;
 
-		s = (char *) ARR_DATA_PTR(arr);
-		bitmap = ARR_NULLBITMAP(arr);
-		bitmask = 1;
-		for (int i = 0; i < nitems; i++)
-		{
-			Datum		elt;
-			Datum		thisresult;
-
-			/* Get array element, checking for NULL. */
-			if (bitmap && (*bitmap & bitmask) == 0)
-			{
-				fcinfo->args[1].value = (Datum) 0;
-				fcinfo->args[1].isnull = true;
-			}
-			else
-			{
-				elt = fetch_att(s, typbyval, typlen);
-				s = att_addlength_pointer(s, typlen, s);
-				s = (char *) att_nominal_alignby(s, typalignby);
-				fcinfo->args[1].value = elt;
-				fcinfo->args[1].isnull = false;
-			}
-
-			fcinfo->isnull = false;
-			thisresult = op->d.hashedscalararrayop.finfo->fn_addr(fcinfo);
-
-			if (fcinfo->isnull)
-				resultnull = true;
-			else if (DatumGetBool(thisresult))
-			{
-				result = BoolGetDatum(true);
-				resultnull = false;
-				break;
-			}
-
-			/* Advance bitmap pointer if any. */
-			if (bitmap)
-			{
-				bitmask <<= 1;
-				if (bitmask == 0x100)
-				{
-					bitmap++;
-					bitmask = 1;
-				}
-			}
-		}
-
-		/* Reverse for NOT IN; NULL stays NULL. */
-		if (!inclause && !resultnull)
-			result = BoolGetDatum(!DatumGetBool(result));
+		ExecEvalArrayCompareReduce(fcinfo,
+								   arr,
+								   typlen,
+								   typbyval,
+								   typalign,
+								   true,
+								   !inclause,
+								   &result,
+								   &resultnull);
 
 		*op->resvalue = result;
 		*op->resnull = resultnull;
