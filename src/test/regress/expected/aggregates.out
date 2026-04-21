@@ -544,11 +544,32 @@ SELECT corr(1e-100 + g * 1e-105, 1e-100 + g * 1e-105)
     1
 (1 row)
 
+SELECT regr_r2(1e-100 + g * 1e-105, 1e-100 + g * 1e-105)
+  FROM generate_series(1, 3) g;
+ regr_r2 
+---------
+       1
+(1 row)
+
 SELECT corr(1e-100 + g * 1e-105, 1e-100 + g * 1e-105)
   FROM generate_series(1, 30) g;
  corr 
 ------
     1
+(1 row)
+
+SELECT regr_r2(1e-100 + g * 1e-105, 1e-100 + g * 1e-105)
+  FROM generate_series(1, 30) g;
+ regr_r2 
+---------
+       1
+(1 row)
+
+SELECT regr_r2(1e154::float8 * g, 1e154::float8 * g)
+  FROM generate_series(1, 2) g;
+ regr_r2 
+---------
+       1
 (1 row)
 
 -- these examples pose definitional questions for NaN inputs,
@@ -559,16 +580,34 @@ SELECT corr(g, 'NaN') FROM generate_series(1, 30) g;
   NaN
 (1 row)
 
+SELECT regr_r2(g, 'NaN') FROM generate_series(1, 30) g;
+ regr_r2 
+---------
+     NaN
+(1 row)
+
 SELECT corr(0.1, 'NaN') FROM generate_series(1, 30) g;
  corr 
 ------
      
 (1 row)
 
+SELECT regr_r2(0.1, 'NaN') FROM generate_series(1, 30) g;
+ regr_r2 
+---------
+       1
+(1 row)
+
 SELECT corr('NaN', 'NaN') FROM generate_series(1, 30) g;
  corr 
 ------
   NaN
+(1 row)
+
+SELECT regr_r2('NaN', 'NaN') FROM generate_series(1, 30) g;
+ regr_r2 
+---------
+     NaN
 (1 row)
 
 -- test accum and combine functions directly
