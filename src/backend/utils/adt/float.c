@@ -3854,34 +3854,17 @@ float8_covar_samp(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(Sxy / (N - 1.0));
 }
 
-Datum
-float8_corr(PG_FUNCTION_ARGS)
+/*
+ * Compute a numerically stable correlation coefficient from summary terms.
+ * Caller must already have handled SQL-level special cases such as Sxx == 0
+ * or Syy == 0.
+ */
+static float8
+float8_corrcoef_stable(float8 Sxx, float8 Syy, float8 Sxy)
 {
-	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
-	float8	   *transvalues;
-	float8		N,
-				Sxx,
-				Syy,
-				Sxy,
-				product,
-				sqrtproduct,
-				result;
-
-	transvalues = check_float8_array(transarray, "float8_corr", 8);
-	N = transvalues[0];
-	Sxx = transvalues[2];
-	Syy = transvalues[4];
-	Sxy = transvalues[5];
-
-	/* if N is 0 we should return NULL */
-	if (N < 1.0)
-		PG_RETURN_NULL();
-
-	/* Note that Sxx and Syy are guaranteed to be non-negative */
-
-	/* per spec, return NULL for horizontal and vertical lines */
-	if (Sxx == 0 || Syy == 0)
-		PG_RETURN_NULL();
+	float8		product;
+	float8		sqrtproduct;
+	float8		result;
 
 	/*
 	 * The product Sxx * Syy might underflow or overflow.  If so, we can
@@ -3905,7 +3888,36 @@ float8_corr(PG_FUNCTION_ARGS)
 	else if (result > 1)
 		result = 1;
 
-	PG_RETURN_FLOAT8(result);
+	return result;
+}
+
+Datum
+float8_corr(PG_FUNCTION_ARGS)
+{
+	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
+	float8	   *transvalues;
+	float8		N,
+				Sxx,
+				Syy,
+				Sxy;
+
+	transvalues = check_float8_array(transarray, "float8_corr", 8);
+	N = transvalues[0];
+	Sxx = transvalues[2];
+	Syy = transvalues[4];
+	Sxy = transvalues[5];
+
+	/* if N is 0 we should return NULL */
+	if (N < 1.0)
+		PG_RETURN_NULL();
+
+	/* Note that Sxx and Syy are guaranteed to be non-negative */
+
+	/* per spec, return NULL for horizontal and vertical lines */
+	if (Sxx == 0 || Syy == 0)
+		PG_RETURN_NULL();
+
+	PG_RETURN_FLOAT8(float8_corrcoef_stable(Sxx, Syy, Sxy));
 }
 
 Datum
@@ -3916,7 +3928,10 @@ float8_regr_r2(PG_FUNCTION_ARGS)
 	float8		N,
 				Sxx,
 				Syy,
-				Sxy;
+				Sxy,
+				denominator,
+				numerator,
+				result;
 
 	transvalues = check_float8_array(transarray, "float8_regr_r2", 8);
 	N = transvalues[0];
@@ -3938,7 +3953,27 @@ float8_regr_r2(PG_FUNCTION_ARGS)
 	if (Syy == 0)
 		PG_RETURN_FLOAT8(1.0);
 
-	PG_RETURN_FLOAT8((Sxy * Sxy) / (Sxx * Syy));
+	if (Sxy == 0 && !isnan(Sxx) && !isnan(Syy))
+		PG_RETURN_FLOAT8(0.0);
+
+	numerator = Sxy * Sxy;
+	denominator = Sxx * Syy;
+
+	if (numerator != 0 && denominator != 0 &&
+		!isinf(numerator) && !isinf(denominator))
+	{
+		result = numerator / denominator;
+
+		/* Roundoff error can leave the direct result just above 1. */
+		if (result > 1)
+			result = 1;
+
+		PG_RETURN_FLOAT8(result);
+	}
+
+	result = float8_corrcoef_stable(Sxx, Syy, Sxy);
+
+	PG_RETURN_FLOAT8(result * result);
 }
 
 Datum
