@@ -898,6 +898,15 @@
   boot_val => 'true',
 },
 
+/* WIP: for now keep this in QUERY_TUNING_GEQO group for testing convenience */
+{ name => 'enable_goo_join_search', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
+  short_desc => 'Enables the planner\'s use of hybrid join search for large join problems.',
+  long_desc => 'Hybrid join search performs exact dynamic programming up to an approximate work budget and completes the search using GOO on selected seeds.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_goo_join_search',
+  boot_val => 'false',
+},
+
 { name => 'enable_group_by_reordering', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables reordering of GROUP BY keys.',
   flags => 'GUC_EXPLAIN',
@@ -1202,6 +1211,16 @@
   boot_val => '4096',
   min => '64',
   max => 'MAX_KILOBYTES',
+},
+
+/* WIP: only for testing */
+{ name => 'goo_greedy_strategy', type => 'enum', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
+  short_desc => 'Selects the heuristic used by GOO to compare join candidates.',
+  long_desc => 'Valid values are result_size, cost, and combined.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'goo_greedy_strategy',
+  boot_val => 'GOO_GREEDY_STRATEGY_COMBINED',
+  options => 'goo_greedy_strategy_options',
 },
 
 { name => 'gss_accept_delegation', type => 'bool', context => 'PGC_SIGHUP', group => 'CONN_AUTH_AUTH',
@@ -1534,6 +1553,16 @@
   boot_val => '8',
   min => '1',
   max => 'INT_MAX',
+},
+
+/* WIP: testing knob for the hybrid join search path */
+{ name => 'join_search_effort', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
+  short_desc => 'Hybrid join search: effort sets a GEQO-like approximate exact-search work budget.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'join_search_effort',
+  boot_val => 'DEFAULT_GEQO_EFFORT',
+  min => 'MIN_GEQO_EFFORT',
+  max => 'MAX_JOIN_SEARCH_EFFORT',
 },
 
 { name => 'krb_caseins_users', type => 'bool', context => 'PGC_SIGHUP', group => 'CONN_AUTH_AUTH',

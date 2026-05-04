@@ -16,11 +16,30 @@
 
 #include "nodes/pathnodes.h"
 
+typedef enum GooGreedyStrategy
+{
+	GOO_GREEDY_STRATEGY_RESULT_SIZE,
+	GOO_GREEDY_STRATEGY_COST,
+	GOO_GREEDY_STRATEGY_COMBINED
+}			GooGreedyStrategy;
+
+/*
+ * Hybrid join search reuses GEQO's default effort scale as an approximate
+ * exact-search work knob.
+ *
+ * TODO: 30 is a prototype sweep cap for comparing hybrid effort against
+ * GEQO-like planning work.  Calibrate it with measured planning-time and
+ * plan-quality data before treating it as a real default range.
+ */
+#define MAX_JOIN_SEARCH_EFFORT 30
 
 /*
  * allpaths.c
  */
 extern PGDLLIMPORT bool enable_geqo;
+extern PGDLLIMPORT bool enable_goo_join_search;
+extern PGDLLIMPORT int goo_greedy_strategy;
+extern PGDLLIMPORT int join_search_effort;
 extern PGDLLIMPORT bool enable_eager_aggregate;
 extern PGDLLIMPORT int geqo_threshold;
 extern PGDLLIMPORT double min_eager_agg_group_size;
