@@ -8,7 +8,7 @@
  * each step. The algorithm maintains a list of "clumps" (join components),
  * initially one per base relation. At each iteration, it evaluates all legal
  * pairs of clumps, selects the pair that produces the cheapest join according
- * to the planner's cost model, and replaces those two clumps with the
+ * to the selected greedy rule, and replaces those two clumps with the
  * resulting joinrel. This continues until only one clump remains.
  *
  * ALGORITHM COMPLEXITY:
@@ -19,6 +19,10 @@
  *   O((n-i)^2) pair evaluations to find the cheapest join.
  * - Total: Sum of (n-i)^2 for i=1 to n-1 ≈ O(n^3)
  *
+ * Hybrid join search first uses PostgreSQL's exact dynamic-programming join
+ * enumeration for an initial exact prefix, then completes promising frontier
+ * seeds with GOO.
+ *
  * REFERENCES:
  *
  * This implementation is based on the algorithm described in:
@@ -28,6 +32,11 @@
  * Systems Applications (DEXA '98), August 1998, Pages 726-735.
  * https://dl.acm.org/doi/10.5555/648311.754892
  *
+ * The hybrid exact-prefix idea is inspired by IDP:
+ *
+ * Donald Kossmann and Konrad Stocker, "Iterative Dynamic Programming:
+ * A New Class of Query Optimization Algorithms".
+ * https://db.in.tum.de/research/publications/journals/idp.pdf
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -43,7 +52,6 @@
 #include "miscadmin.h"
 #include "nodes/bitmapset.h"
 #include "nodes/pathnodes.h"
-#include "optimizer/geqo.h"
 #include "optimizer/goo.h"
 #include "optimizer/joininfo.h"
 #include "optimizer/pathnode.h"
@@ -56,6 +64,15 @@
  */
 bool		enable_goo_join_search = false;
 int			goo_greedy_strategy = GOO_GREEDY_STRATEGY_COMBINED;
+int			goo_hybrid_exact_level = DEFAULT_GOO_HYBRID_EXACT_LEVEL;
+
+/*
+ * Keep the hybrid completion tail small and stable.  This MVP considers at
+ * most two frontier seeds: the minimum exact-prefix result size and the
+ * minimum exact-prefix path cost.  Each seed is completed with COMBINED GOO,
+ * which runs one RESULT_SIZE completion and one COST completion.
+ */
+#define HYBRID_PROMISING_SEED_LIMIT 2
 
 /*
  * Working state for a single GOO search invocation.
@@ -101,6 +118,11 @@ typedef struct GooCandidate
 	Relids		joinrelids;		/* relids covered by this join */
 }			GooCandidate;
 
+/*
+ * Result of one private GOO strategy attempt.  COMBINED GOO and hybrid
+ * completion both need the winning final rel plus the join_rel_* state that
+ * belongs to that attempt.
+ */
 typedef struct GooStrategyResult
 {
 	RelOptInfo *result;
@@ -109,10 +131,13 @@ typedef struct GooStrategyResult
 	struct HTAB *join_rel_hash;
 }			GooStrategyResult;
 
+/* GOO search support. */
 static GooState * goo_init_state(PlannerInfo *root, List *initial_rels,
 								 GooGreedyStrategy strategy);
 static void goo_destroy_state(GooState * state);
 static RelOptInfo *goo_search_internal(GooState * state);
+static void goo_restore_joinrel_state(PlannerInfo *root, int saved_rel_len,
+									  struct HTAB *saved_hash);
 static void goo_reset_probe_state(GooState * state, int saved_rel_len,
 								  struct HTAB *saved_hash);
 static GooCandidate * goo_build_candidate(GooState * state, RelOptInfo *left,
@@ -123,20 +148,42 @@ static bool goo_candidate_better(GooGreedyStrategy strategy,
 static bool goo_candidate_prunable(GooState * state, RelOptInfo *left,
 								   RelOptInfo *right);
 static const char *goo_strategy_name(GooGreedyStrategy strategy);
+static bool goo_strategy_result_better(GooStrategyResult * a,
+									   GooStrategyResult * b);
+static GooStrategyResult goo_run_combined_strategy(PlannerInfo *root,
+												   List *initial_rels,
+												   List *base_join_rel_list,
+												   struct HTAB *base_hash,
+												   GooGreedyStrategy * best_strategy);
 static GooStrategyResult goo_run_strategy(PlannerInfo *root, List *initial_rels,
 										  List *base_join_rel_list,
 										  struct HTAB *base_hash,
 										  GooGreedyStrategy strategy);
 
+/* Hybrid exact-prefix and GOO-completion support. */
+static int	hybrid_seed_result_size_cmp(RelOptInfo *seed_a,
+										RelOptInfo *seed_b);
+static int	hybrid_seed_cost_cmp(RelOptInfo *seed_a, RelOptInfo *seed_b);
+static List *hybrid_select_promising_frontier(List *frontier);
+static void hybrid_process_join_level(PlannerInfo *root, int level);
+static List *hybrid_build_reduced_problem(List *initial_rels,
+										  RelOptInfo *seed);
+static GooStrategyResult hybrid_evaluate_seed_attempt(PlannerInfo *root,
+													  List *initial_rels,
+													  RelOptInfo *seed,
+													  List *base_join_rel_list,
+													  struct HTAB *base_hash,
+													  GooGreedyStrategy * best_strategy);
+
 /*
  * goo_join_search
  *		Entry point for Greedy Operator Ordering join search algorithm.
  *
- * This function is called from make_rel_from_joinlist() when
- * enable_goo_join_search is true and the number of relations meets or
- * exceeds geqo_threshold.
+ * This function runs GOO over the supplied clumps.  For standalone GOO, the
+ * clumps are the base relations from make_rel_from_joinlist().  Hybrid is
+ * routed to goo_hybrid_join_search() before reaching this function.
  *
- * Returns the final RelOptInfo representing the join of all base relations,
+ * Returns the final RelOptInfo representing the join of all supplied clumps,
  * or errors out if no valid join order can be found.
  */
 RelOptInfo *
@@ -148,46 +195,25 @@ goo_join_search(PlannerInfo *root, int levels_needed,
 	int			base_rel_count;
 	struct HTAB *base_hash;
 
-	/* If COMBINED mode, try all strategies and return the better one */
+	(void) levels_needed;
+
+	if (goo_greedy_strategy == GOO_GREEDY_STRATEGY_HYBRID)
+		elog(ERROR, "GOO hybrid search should use goo_hybrid_join_search");
+
+	/* If COMBINED mode, try all strategies and return the better one. */
 	if (goo_greedy_strategy == GOO_GREEDY_STRATEGY_COMBINED)
 	{
-		static const GooGreedyStrategy combined_strategies[] = {
-			GOO_GREEDY_STRATEGY_RESULT_SIZE,
-			GOO_GREEDY_STRATEGY_COST
-		};
-		GooStrategyResult best_result = {0};
-		GooGreedyStrategy best_strategy = GOO_GREEDY_STRATEGY_COST;
+		GooStrategyResult best_result;
+		GooGreedyStrategy best_strategy;
 		List	   *base_join_rel_list;
-		bool		have_best = false;
 
 		base_join_rel_list = root->join_rel_list;
 		base_hash = root->join_rel_hash;
 
-		for (int i = 0; i < lengthof(combined_strategies); i++)
-		{
-			GooGreedyStrategy strategy = combined_strategies[i];
-			GooStrategyResult result;
-
-			result = goo_run_strategy(root, initial_rels,
-									  base_join_rel_list, base_hash,
-									  strategy);
-
-			if (result.result == NULL)
-				continue;
-
-			if (!have_best || result.total_cost < best_result.total_cost)
-			{
-				best_result = result;
-				best_strategy = strategy;
-				have_best = true;
-			}
-		}
-
-		/*
-		 * During development/testing, fail fast when every strategy fails.
-		 */
-		if (!have_best)
-			elog(ERROR, "GOO join search failed: all strategies exhausted without a valid join order");
+		best_result = goo_run_combined_strategy(root, initial_rels,
+												base_join_rel_list,
+												base_hash,
+												&best_strategy);
 
 		/*
 		 * Pick the lowest-cost result across strategies.
@@ -217,14 +243,160 @@ goo_join_search(PlannerInfo *root, int levels_needed,
 
 	if (result == NULL)
 	{
+		goo_destroy_state(state);
+
 		/* Restore planner state before reporting error */
-		root->join_rel_list = list_truncate(root->join_rel_list, base_rel_count);
-		root->join_rel_hash = base_hash;
+		goo_restore_joinrel_state(root, base_rel_count, base_hash);
 		elog(ERROR, "GOO join search failed to find a valid join order");
 	}
 
 	goo_destroy_state(state);
 	return result;
+}
+
+/*
+ * goo_hybrid_join_search
+ *		Run a fixed-level exact-prefix + seeded completion search.
+ *
+ * The search proceeds in three phases:
+ *
+ * 1. Build exact DP levels up to goo_hybrid_exact_level, capped at the
+ *    current join problem size.
+ * 2. If exact search stops before the final level, use the last nonempty level
+ *    as the frontier.
+ * 3. Pick at most two frontier seeds: one with the minimum exact-prefix result
+ *    size and one with the minimum exact-prefix path cost.  Each selected seed
+ *    is completed with COMBINED GOO.  The prototype exposes this algorithm as
+ *    goo_greedy_strategy = 'hybrid', but hybrid itself does not consult the
+ *    other greedy strategy values.
+ *
+ * TODO: This prototype runs one exact-prefix pass and then completes the
+ * selected seeds with GOO.  A closer IDP1 implementation would select a seed,
+ * reduce the problem, restart exact DP on the reduced problem, and repeat the
+ * break/select/reduce cycle as needed.
+ *
+ * This is a testing implementation: unexpected states are treated as errors so
+ * that problems surface immediately during development.
+ */
+RelOptInfo *
+goo_hybrid_join_search(PlannerInfo *root, int levels_needed, List *initial_rels)
+{
+	int			frontier_level = 0;
+	int			last_nonempty_level = 1;
+	int			configured_exact_level;
+	int			exact_level;
+	List	   *frontier;
+	int			remaining_rels;
+	List	   *promising_seeds;
+	List	   *base_join_rel_list;
+	struct HTAB *base_hash;
+	GooStrategyResult winner = {0};
+	GooGreedyStrategy winner_strategy = GOO_GREEDY_STRATEGY_COST;
+	bool		have_winner = false;
+
+	root->assumeReplanning = true;
+	configured_exact_level = goo_hybrid_exact_level;
+	/* Larger values mean full exact DP for the current join problem. */
+	exact_level = Min(configured_exact_level, levels_needed);
+
+	Assert(root->join_rel_level == NULL);
+
+	root->join_rel_level = (List **) palloc0((levels_needed + 1) * sizeof(List *));
+	root->join_rel_level[1] = initial_rels;
+
+	for (int lev = 2; lev <= exact_level; lev++)
+	{
+		join_search_one_level(root, lev);
+		hybrid_process_join_level(root, lev);
+
+		if (root->join_rel_level[lev] == NIL)
+		{
+			if (lev == levels_needed)
+				elog(ERROR, "hybrid join search failed to build any %d-way joins", levels_needed);
+			continue;
+		}
+
+		last_nonempty_level = lev;
+
+		if (lev == levels_needed)
+		{
+			RelOptInfo *exact_rel;
+
+			Assert(list_length(root->join_rel_level[lev]) == 1);
+			exact_rel = linitial_node(RelOptInfo, root->join_rel_level[lev]);
+			elog(DEBUG2,
+				 "HS exact-complete: levels=%d configured_exact_level=%d effective_exact_level=%d exact_dp_level=%d",
+				 levels_needed, configured_exact_level, exact_level, lev);
+			root->join_rel_level = NULL;
+			return exact_rel;
+		}
+	}
+
+	frontier_level = last_nonempty_level;
+	if (frontier_level <= 0)
+		elog(ERROR, "hybrid join search stopped without a valid frontier level");
+	if (frontier_level < 2)
+		elog(ERROR, "hybrid join search stopped before building a 2-way frontier");
+
+	frontier = root->join_rel_level[frontier_level];
+	if (frontier == NIL)
+		elog(ERROR, "hybrid join search frontier at level %d is empty", frontier_level);
+
+	elog(DEBUG2,
+		 "HS exact-prefix-stop: levels=%d configured_exact_level=%d effective_exact_level=%d exact_dp_level=%d exact_dp_rels=%d",
+		 levels_needed, configured_exact_level, exact_level,
+		 frontier_level, list_length(frontier));
+
+	/*
+	 * Prevent heuristic make_join_rel() calls from appending to the exact DP
+	 * level arrays.  The frontier list itself remains valid as a read-only
+	 * list of seed states.
+	 *
+	 * TODO: Rework seed evaluation to use per-seed temporary contexts and
+	 * final-winner rebuild, similar in spirit to GEQO.
+	 */
+	base_join_rel_list = root->join_rel_list;
+	base_hash = root->join_rel_hash;
+	root->join_rel_level = NULL;
+
+	remaining_rels = levels_needed - frontier_level;
+
+	promising_seeds = hybrid_select_promising_frontier(frontier);
+	if (promising_seeds == NIL)
+		elog(ERROR, "hybrid join search did not find any promising frontier seed");
+
+	foreach_ptr(RelOptInfo, seed, promising_seeds)
+	{
+		GooStrategyResult seed_result;
+		GooGreedyStrategy seed_strategy;
+
+		seed_result = hybrid_evaluate_seed_attempt(root, initial_rels, seed,
+												   base_join_rel_list,
+												   base_hash,
+												   &seed_strategy);
+
+		if (!have_winner ||
+			goo_strategy_result_better(&seed_result, &winner))
+		{
+			winner = seed_result;
+			winner_strategy = seed_strategy;
+			have_winner = true;
+		}
+	}
+
+	if (!have_winner)
+		elog(ERROR, "hybrid join search did not run any completion attempt");
+
+	root->join_rel_list = winner.join_rel_list;
+	root->join_rel_hash = winner.join_rel_hash;
+	elog(DEBUG2,
+		 "HS frontier-complete: levels=%d configured_exact_level=%d effective_exact_level=%d exact_dp_level=%d frontier_seeds=%d promising_seeds=%d remaining_rels=%d winner_strategy=%s winner_cost=%.2f",
+		 levels_needed, configured_exact_level, exact_level,
+		 frontier_level, list_length(frontier), list_length(promising_seeds),
+		 remaining_rels,
+		 goo_strategy_name(winner_strategy), winner.total_cost);
+
+	return winner.result;
 }
 
 /*
@@ -293,6 +465,20 @@ goo_destroy_state(GooState * state)
 	pfree(state);
 }
 
+/*
+ * goo_strategy_result_better
+ *		Compare completed strategy results by final path cost.
+ */
+static bool
+goo_strategy_result_better(GooStrategyResult * a, GooStrategyResult * b)
+{
+	return a->total_cost < b->total_cost;
+}
+
+/*
+ * goo_run_strategy
+ *		Run one concrete greedy strategy and capture its private join state.
+ */
 static GooStrategyResult
 goo_run_strategy(PlannerInfo *root, List *initial_rels,
 				 List *base_join_rel_list, struct HTAB *base_hash,
@@ -316,7 +502,13 @@ goo_run_strategy(PlannerInfo *root, List *initial_rels,
 	result.result = goo_search_internal(state);
 
 	if (result.result != NULL)
+	{
+		if (result.result->cheapest_total_path == NULL)
+			elog(ERROR, "GOO %s strategy produced a result without a cheapest path",
+				 goo_strategy_name(strategy));
+
 		result.total_cost = result.result->cheapest_total_path->total_cost;
+	}
 
 	result.join_rel_list = root->join_rel_list;
 	result.join_rel_hash = root->join_rel_hash;
@@ -327,6 +519,57 @@ goo_run_strategy(PlannerInfo *root, List *initial_rels,
 	root->join_rel_hash = base_hash;
 
 	return result;
+}
+
+/*
+ * goo_run_combined_strategy
+ *		Run the result-size and cost strategies and choose the better result.
+ *
+ * Standalone COMBINED GOO and hybrid seed completion share this helper so that
+ * both entry points rank completed plans the same way.
+ */
+static GooStrategyResult
+goo_run_combined_strategy(PlannerInfo *root, List *initial_rels,
+						  List *base_join_rel_list, struct HTAB *base_hash,
+						  GooGreedyStrategy * best_strategy)
+{
+	static const GooGreedyStrategy combined_strategies[] = {
+		GOO_GREEDY_STRATEGY_RESULT_SIZE,
+		GOO_GREEDY_STRATEGY_COST
+	};
+	GooStrategyResult best_result = {0};
+	bool		have_best = false;
+
+	if (best_strategy != NULL)
+		*best_strategy = GOO_GREEDY_STRATEGY_COST;
+
+	for (int i = 0; i < lengthof(combined_strategies); i++)
+	{
+		GooGreedyStrategy strategy = combined_strategies[i];
+		GooStrategyResult strategy_result;
+
+		strategy_result = goo_run_strategy(root, initial_rels,
+										   base_join_rel_list,
+										   base_hash,
+										   strategy);
+
+		if (strategy_result.result == NULL)
+			continue;
+
+		if (!have_best ||
+			goo_strategy_result_better(&strategy_result, &best_result))
+		{
+			best_result = strategy_result;
+			if (best_strategy != NULL)
+				*best_strategy = strategy;
+			have_best = true;
+		}
+	}
+
+	if (!have_best)
+		elog(ERROR, "GOO join search failed: all strategies exhausted without a valid join order");
+
+	return best_result;
 }
 
 /*
@@ -432,9 +675,11 @@ goo_search_internal(GooState * state)
 		 * update the clumps list.
 		 */
 		final_rel = goo_commit_join(state, best_candidate);
-
 		if (final_rel == NULL)
+		{
+			MemoryContextSwitchTo(oldcxt);
 			elog(ERROR, "GOO join search failed to commit join");
+		}
 	}
 
 	/* Switch back to the original context before returning */
@@ -560,6 +805,9 @@ static GooCandidate * goo_build_candidate(GooState * state, RelOptInfo *left,
 		set_cheapest(grouped_rel);
 	}
 
+	if (joinrel->cheapest_total_path == NULL)
+		elog(ERROR, "GOO failed to find a cheapest path for a candidate join");
+
 	result_size = joinrel->rows * joinrel->reltarget->width;
 	total_cost = joinrel->cheapest_total_path->total_cost;
 
@@ -588,6 +836,44 @@ static GooCandidate * goo_build_candidate(GooState * state, RelOptInfo *left,
 }
 
 /*
+ * goo_restore_joinrel_state
+ *		Restore the planner's join_rel_list and join_rel_hash.
+ *
+ * This is shared by failure cleanup and speculative candidate probing.
+ */
+static void
+goo_restore_joinrel_state(PlannerInfo *root, int saved_rel_len,
+						  struct HTAB *saved_hash)
+{
+	int			cur_rel_len;
+
+	cur_rel_len = list_length(root->join_rel_list);
+
+	/*
+	 * If the strategy reused the caller's hash table, remove the tail entries
+	 * before truncating the list.  If it built a private replacement hash
+	 * table, just drop that table by restoring the caller's hash pointer.
+	 */
+	if (saved_hash != NULL && root->join_rel_hash == saved_hash &&
+		cur_rel_len > saved_rel_len)
+	{
+		for (int i = saved_rel_len; i < cur_rel_len; i++)
+		{
+			RelOptInfo *joinrel = list_nth_node(RelOptInfo,
+												root->join_rel_list, i);
+			bool		found;
+
+			(void) hash_search(saved_hash, &(joinrel->relids),
+							   HASH_REMOVE, &found);
+			Assert(found);
+		}
+	}
+
+	root->join_rel_list = list_truncate(root->join_rel_list, saved_rel_len);
+	root->join_rel_hash = saved_hash;
+}
+
+/*
  * goo_reset_probe_state
  *		Clean up after a speculative joinrel evaluation.
  *
@@ -603,31 +889,7 @@ static void
 goo_reset_probe_state(GooState * state, int saved_rel_len,
 					  struct HTAB *saved_hash)
 {
-	PlannerInfo *root = state->root;
-	int			cur_rel_len;
-
-	cur_rel_len = list_length(root->join_rel_list);
-
-	/* Remove hashtable entries created by this probe before resetting memory. */
-	if (saved_hash != NULL && cur_rel_len > saved_rel_len)
-	{
-		for (int i = saved_rel_len; i < cur_rel_len; i++)
-		{
-			RelOptInfo *joinrel = list_nth_node(RelOptInfo,
-												root->join_rel_list, i);
-			bool		found;
-
-			(void) hash_search(saved_hash, &(joinrel->relids),
-							   HASH_REMOVE, &found);
-			Assert(found);
-		}
-	}
-
-	/* Remove speculative joinrels from the planner's lists */
-	root->join_rel_list = list_truncate(root->join_rel_list, saved_rel_len);
-	root->join_rel_hash = saved_hash;
-
-	/* Free all memory used during speculative evaluation */
+	goo_restore_joinrel_state(state->root, saved_rel_len, saved_hash);
 	MemoryContextReset(state->scratch_cxt);
 }
 
@@ -721,6 +983,15 @@ goo_candidate_better(GooGreedyStrategy strategy,
 			elog(ERROR, "goo_candidate_better should not be called in COMBINED mode");
 			return false;
 
+		case GOO_GREEDY_STRATEGY_HYBRID:
+
+			/*
+			 * Hybrid is a top-level prototype search mode, not a candidate
+			 * rule.
+			 */
+			elog(ERROR, "goo_candidate_better should not be called in HYBRID mode");
+			return false;
+
 		case GOO_GREEDY_STRATEGY_RESULT_SIZE:
 			if (a->result_size < b->result_size)
 				return true;
@@ -734,7 +1005,6 @@ goo_candidate_better(GooGreedyStrategy strategy,
 			if (a->total_cost > b->total_cost)
 				return false;
 			break;
-
 	}
 
 	return bms_compare(a->joinrelids, b->joinrelids) < 0;
@@ -751,7 +1021,150 @@ goo_strategy_name(GooGreedyStrategy strategy)
 			return "COST";
 		case GOO_GREEDY_STRATEGY_COMBINED:
 			return "COMBINED";
+		case GOO_GREEDY_STRATEGY_HYBRID:
+			return "HYBRID";
 	}
 
 	return "UNKNOWN";
+}
+
+static int
+hybrid_seed_result_size_cmp(RelOptInfo *seed_a, RelOptInfo *seed_b)
+{
+	double		score_a;
+	double		score_b;
+	int			cmp;
+
+	score_a = seed_a->rows * (double) seed_a->reltarget->width;
+	score_b = seed_b->rows * (double) seed_b->reltarget->width;
+
+	if (score_a < score_b)
+		return -1;
+	if (score_a > score_b)
+		return 1;
+
+	cmp = bms_compare(seed_a->relids, seed_b->relids);
+	if (cmp != 0)
+		return cmp;
+
+	return 0;
+}
+
+static int
+hybrid_seed_cost_cmp(RelOptInfo *seed_a, RelOptInfo *seed_b)
+{
+	int			cmp;
+
+	if (seed_a->cheapest_total_path == NULL || seed_b->cheapest_total_path == NULL)
+		elog(ERROR, "hybrid join search cannot rank frontier seeds by cost without cheapest paths");
+
+	cmp = compare_path_costs(seed_a->cheapest_total_path,
+							 seed_b->cheapest_total_path,
+							 TOTAL_COST);
+	if (cmp != 0)
+		return cmp;
+
+	return bms_compare(seed_a->relids, seed_b->relids);
+}
+
+static List *
+hybrid_select_promising_frontier(List *frontier)
+{
+	RelOptInfo *result_size_seed = NULL;
+	RelOptInfo *cost_seed = NULL;
+	List	   *promising_seeds = NIL;
+
+	/*
+	 * Keep the prototype small but not single-minded: the cheapest frontier
+	 * rel and the smallest estimated intermediate result capture different
+	 * failure modes of a partial exact prefix.
+	 */
+	foreach_ptr(RelOptInfo, seed, frontier)
+	{
+		if (result_size_seed == NULL ||
+			hybrid_seed_result_size_cmp(seed, result_size_seed) < 0)
+			result_size_seed = seed;
+
+		if (cost_seed == NULL ||
+			hybrid_seed_cost_cmp(seed, cost_seed) < 0)
+			cost_seed = seed;
+	}
+
+	if (result_size_seed != NULL)
+		promising_seeds = lappend(promising_seeds, result_size_seed);
+
+	if (cost_seed != NULL && cost_seed != result_size_seed)
+		promising_seeds = lappend(promising_seeds, cost_seed);
+
+	Assert(list_length(promising_seeds) <= HYBRID_PROMISING_SEED_LIMIT);
+	return promising_seeds;
+}
+
+static void
+hybrid_process_join_level(PlannerInfo *root, int level)
+{
+	foreach_ptr(RelOptInfo, rel, root->join_rel_level[level])
+	{
+		bool		is_top_rel;
+
+		is_top_rel = bms_equal(rel->relids, root->all_query_rels);
+
+		generate_partitionwise_join_paths(root, rel);
+		if (!is_top_rel)
+			generate_useful_gather_paths(root, rel, false);
+		set_cheapest(rel);
+
+		if (rel->grouped_rel != NULL && !is_top_rel)
+		{
+			RelOptInfo *grouped_rel = rel->grouped_rel;
+
+			Assert(IS_GROUPED_REL(grouped_rel));
+
+			generate_grouped_paths(root, grouped_rel, rel);
+			set_cheapest(grouped_rel);
+		}
+	}
+}
+
+static List *
+hybrid_build_reduced_problem(List *initial_rels, RelOptInfo *seed)
+{
+	List	   *reduced_rels = list_make1(seed);
+
+	foreach_ptr(RelOptInfo, rel, initial_rels)
+	{
+		if (!bms_overlap(rel->relids, seed->relids))
+			reduced_rels = lappend(reduced_rels, rel);
+	}
+
+	return reduced_rels;
+}
+
+static GooStrategyResult
+hybrid_evaluate_seed_attempt(PlannerInfo *root, List *initial_rels,
+							 RelOptInfo *seed,
+							 List *base_join_rel_list,
+							 struct HTAB *base_hash,
+							 GooGreedyStrategy * best_strategy)
+{
+	List	   *reduced_rels;
+	GooStrategyResult strategy_result;
+
+	reduced_rels = hybrid_build_reduced_problem(initial_rels, seed);
+
+	/*
+	 * The reduced problem starts with the exact-prefix seed as one clump and
+	 * the remaining base rels as ordinary GOO clumps.  Each attempt starts
+	 * from the same exact-prefix joinrel state; reduced_rels is only the GOO
+	 * clump list, not the planner's joinrel catalog.
+	 */
+	strategy_result = goo_run_combined_strategy(root, reduced_rels,
+												base_join_rel_list,
+												base_hash,
+												best_strategy);
+
+	if (strategy_result.result == NULL)
+		elog(ERROR, "hybrid join search failed to find a valid join order for a seed");
+
+	return strategy_result;
 }

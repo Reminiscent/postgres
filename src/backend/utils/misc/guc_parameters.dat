@@ -900,8 +900,8 @@
 
 /* WIP: for now keep this in QUERY_TUNING_GEQO group for testing convenience */
 { name => 'enable_goo_join_search', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
-  short_desc => 'Enables the planner\'s use of GOO join search for large join problems.',
-  long_desc => 'Greedy Operator Ordering (GOO) is a deterministic join search algorithm for queries with many relations.',
+  short_desc => 'Enables the planner\'s use of GOO-family join search for large join problems.',
+  long_desc => 'The prototype GOO-family search is selected by goo_greedy_strategy and uses geqo_threshold for activation.',
   flags => 'GUC_EXPLAIN',
   variable => 'enable_goo_join_search',
   boot_val => 'false',
@@ -1215,12 +1215,22 @@
 
 /* WIP: only for testing */
 { name => 'goo_greedy_strategy', type => 'enum', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
-  short_desc => 'Selects the heuristic used by GOO to compare join candidates.',
-  long_desc => 'Valid values are result_size, cost, and combined.',
+  short_desc => 'Selects the prototype GOO-family join search strategy.',
+  long_desc => 'Valid values are result_size, cost, combined, and hybrid.  The hybrid value is a prototype shortcut for fixed-level exact-prefix search followed by combined GOO completion.',
   flags => 'GUC_EXPLAIN',
   variable => 'goo_greedy_strategy',
   boot_val => 'GOO_GREEDY_STRATEGY_COMBINED',
   options => 'goo_greedy_strategy_options',
+},
+
+/* WIP: testing knob for the hybrid join search path */
+{ name => 'goo_hybrid_exact_level', type => 'int', context => 'PGC_USERSET', group => 'QUERY_TUNING_GEQO',
+  short_desc => 'Hybrid GOO join search: sets the highest exact dynamic-programming join level to build.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'goo_hybrid_exact_level',
+  boot_val => 'DEFAULT_GOO_HYBRID_EXACT_LEVEL',
+  min => '2',
+  max => 'INT_MAX',
 },
 
 { name => 'gss_accept_delegation', type => 'bool', context => 'PGC_SIGHUP', group => 'CONN_AUTH_AUTH',

@@ -427,6 +427,7 @@ static const struct config_enum_entry goo_greedy_strategy_options[] = {
 	{"result_size", GOO_GREEDY_STRATEGY_RESULT_SIZE, false},
 	{"cost", GOO_GREEDY_STRATEGY_COST, false},
 	{"combined", GOO_GREEDY_STRATEGY_COMBINED, false},
+	{"hybrid", GOO_GREEDY_STRATEGY_HYBRID, false},
 	{NULL, 0, false}
 };
 

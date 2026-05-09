@@ -49,6 +49,7 @@ ANALYZE;
 
 -- Verify combined is the default strategy.
 SHOW goo_greedy_strategy;
+SHOW goo_hybrid_exact_level;
 
 --
 -- Basic 3-way join (sanity check)
@@ -66,6 +67,30 @@ SELECT count(*)
 FROM (VALUES (1),(2)) AS a(x)
 JOIN (VALUES (1),(2)) AS b(x) USING (x)
 JOIN (VALUES (1),(3)) AS c(x) USING (x);
+
+--
+-- Hybrid fixed-K prototype mode
+--
+SET goo_greedy_strategy = hybrid;
+
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+FROM t1
+JOIN t2 ON t1.a = t2.a
+JOIN t3 ON t1.b = t3.b
+JOIN t4 ON t2.c = t4.c
+JOIN t5 ON t3.d = t5.d
+JOIN t6 ON t4.e = t6.e;
+
+SELECT count(*)
+FROM t1
+JOIN t2 ON t1.a = t2.a
+JOIN t3 ON t1.b = t3.b
+JOIN t4 ON t2.c = t4.c
+JOIN t5 ON t3.d = t5.d
+JOIN t6 ON t4.e = t6.e;
+
+RESET goo_greedy_strategy;
 
 --
 -- Disconnected graph (Cartesian products required)
