@@ -6673,6 +6673,14 @@ make_pathkeys_for_window(PlannerInfo *root, WindowClause *wc,
 	return window_pathkeys;
 }
 
+typedef struct SortInputTargetCol
+{
+	Expr	   *expr;
+	Index		sortgroupref;
+	bool		is_srf;
+	bool		postpone;
+}			SortInputTargetCol;
+
 /*
  * make_sort_input_target
  *	  Generate appropriate PathTarget for initial input to Sort step.
@@ -6746,9 +6754,8 @@ make_sort_input_target(PlannerInfo *root,
 {
 	Query	   *parse = root->parse;
 	PathTarget *input_target;
+	SortInputTargetCol *colinfo;
 	int			ncols;
-	bool	   *col_is_srf;
-	bool	   *postpone_col;
 	bool		have_srf;
 	bool		have_volatile;
 	bool		have_expensive;
@@ -6766,14 +6773,17 @@ make_sort_input_target(PlannerInfo *root,
 
 	/* Inspect tlist and collect per-column information */
 	ncols = list_length(final_target->exprs);
-	col_is_srf = (bool *) palloc0(ncols * sizeof(bool));
-	postpone_col = (bool *) palloc0(ncols * sizeof(bool));
+	colinfo = (SortInputTargetCol *) palloc0(ncols * sizeof(SortInputTargetCol));
 	have_srf = have_volatile = have_expensive = have_srf_sortcols = false;
 
 	i = 0;
 	foreach(lc, final_target->exprs)
 	{
 		Expr	   *expr = (Expr *) lfirst(lc);
+		SortInputTargetCol *col = &colinfo[i];
+
+		col->expr = expr;
+		col->sortgroupref = get_pathtarget_sortgroupref(final_target, i);
 
 		/*
 		 * If the column has a sortgroupref, assume it has to be evaluated
@@ -6783,7 +6793,7 @@ make_sort_input_target(PlannerInfo *root,
 		 * only be Vars anyway.  There don't seem to be any cases where it
 		 * would be worth the trouble to double-check.
 		 */
-		if (get_pathtarget_sortgroupref(final_target, i) == 0)
+		if (col->sortgroupref == 0)
 		{
 			/*
 			 * Check for SRF or volatile functions.  Check the SRF case first
@@ -6793,13 +6803,13 @@ make_sort_input_target(PlannerInfo *root,
 				expression_returns_set((Node *) expr))
 			{
 				/* We'll decide below whether these are postponable */
-				col_is_srf[i] = true;
+				col->is_srf = true;
 				have_srf = true;
 			}
 			else if (contain_volatile_functions((Node *) expr))
 			{
 				/* Unconditionally postpone */
-				postpone_col[i] = true;
+				col->postpone = true;
 				have_volatile = true;
 			}
 			else
@@ -6820,7 +6830,7 @@ make_sort_input_target(PlannerInfo *root,
 				 */
 				if (cost.per_tuple > 10 * cpu_operator_cost)
 				{
-					postpone_col[i] = true;
+					col->postpone = true;
 					have_expensive = true;
 				}
 			}
@@ -6869,13 +6879,13 @@ make_sort_input_target(PlannerInfo *root,
 	i = 0;
 	foreach(lc, final_target->exprs)
 	{
-		Expr	   *expr = (Expr *) lfirst(lc);
+		SortInputTargetCol *col = &colinfo[i];
 
-		if (postpone_col[i] || (postpone_srfs && col_is_srf[i]))
-			postponable_cols = lappend(postponable_cols, expr);
+		if (col->postpone || (postpone_srfs && col->is_srf))
+			postponable_cols = lappend(postponable_cols, col->expr);
 		else
-			add_column_to_pathtarget(input_target, expr,
-									 get_pathtarget_sortgroupref(final_target, i));
+			add_column_to_pathtarget(input_target, col->expr,
+									 col->sortgroupref);
 
 		i++;
 	}
