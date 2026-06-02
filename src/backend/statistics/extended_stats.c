@@ -33,6 +33,7 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "rewrite/rewriteHandler.h"
+#include "rewrite/rewriteManip.h"
 #include "statistics/extended_stats_internal.h"
 #include "statistics/statistics.h"
 #include "utils/acl.h"
@@ -1606,6 +1607,8 @@ statext_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
 							 Bitmapset **attnums, List **exprs)
 {
 	RestrictInfo *rinfo;
+	Relids		clause_relids;
+	Node	   *stat_clause;
 	int			clause_relid;
 	bool		leakproof;
 
@@ -1643,16 +1646,26 @@ statext_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
 		return false;
 
 	/* Clauses referencing other varnos are incompatible. */
-	if (!bms_get_singleton_member(rinfo->clause_relids, &clause_relid) ||
+	clause_relids = bms_difference(rinfo->clause_relids, root->outer_join_rels);
+	if (!bms_get_singleton_member(clause_relids, &clause_relid) ||
 		clause_relid != relid)
+	{
+		bms_free(clause_relids);
 		return false;
+	}
+	bms_free(clause_relids);
+
+	stat_clause = (Node *) rinfo->clause;
+	if (bms_overlap(rinfo->clause_relids, root->outer_join_rels))
+		stat_clause = remove_nulling_relids(stat_clause, root->outer_join_rels,
+											NULL);
 
 	/*
 	 * Check the clause, determine what attributes it references, and whether
 	 * it includes any non-leakproof operators.
 	 */
 	leakproof = true;
-	if (!statext_is_compatible_clause_internal(root, (Node *) rinfo->clause,
+	if (!statext_is_compatible_clause_internal(root, stat_clause,
 											   relid, attnums, exprs,
 											   &leakproof))
 		return false;

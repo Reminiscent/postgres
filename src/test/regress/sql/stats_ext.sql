@@ -1148,6 +1148,19 @@ SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists WHERE 1 > mod(a,20) 
 
 SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists WHERE mod(a,20) = 1 AND mod(b::int,10) = 1 AND mod(c,5) = 1');
 
+-- outer-join nullingrels should not prevent matching expression MCV stats
+CREATE STATISTICS mcv_lists_coalesce_stats (mcv)
+  ON (coalesce(mod(a,20),1)), (coalesce(mod(b::int,10),1)), (coalesce(mod(c,5),1))
+  FROM mcv_lists;
+
+ANALYZE mcv_lists;
+
+SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists WHERE coalesce(mod(a,20),1) = 1 AND coalesce(mod(b::int,10),1) = 1 AND coalesce(mod(c,5),1) = 1');
+
+SELECT * FROM check_estimated_rows('SELECT * FROM (VALUES (1)) AS d(x) LEFT JOIN mcv_lists m ON true WHERE coalesce(mod(m.a,20),1) = 1 AND coalesce(mod(m.b::int,10),1) = 1 AND coalesce(mod(m.c,5),1) = 1');
+
+DROP STATISTICS mcv_lists_coalesce_stats;
+
 SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists WHERE mod(a,20) = 1 OR mod(b::int,10) = 1 OR mod(c,25) = 1 OR d IS NOT NULL');
 
 SELECT * FROM check_estimated_rows('SELECT * FROM mcv_lists WHERE mod(a,20) IN (1, 2, 51, 52, NULL) AND mod(b::int,10) IN ( 1, 2, NULL)');

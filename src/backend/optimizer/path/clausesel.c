@@ -528,6 +528,7 @@ find_single_rel_for_clauses(PlannerInfo *root, List *clauses)
 	foreach(l, clauses)
 	{
 		RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);
+		Relids		relids;
 		int			relid;
 
 		/*
@@ -561,10 +562,19 @@ find_single_rel_for_clauses(PlannerInfo *root, List *clauses)
 		if (!IsA(rinfo, RestrictInfo))
 			return NULL;
 
-		if (bms_is_empty(rinfo->clause_relids))
+		relids = bms_difference(rinfo->clause_relids, root->outer_join_rels);
+		if (bms_is_empty(relids))
+		{
+			bms_free(relids);
 			continue;			/* we can ignore variable-free clauses */
-		if (!bms_get_singleton_member(rinfo->clause_relids, &relid))
+		}
+		if (!bms_get_singleton_member(relids, &relid))
+		{
+			bms_free(relids);
 			return NULL;		/* multiple relations in this clause */
+		}
+		bms_free(relids);
+
 		if (lastrelid == 0)
 			lastrelid = relid;	/* first clause referencing a relation */
 		else if (relid != lastrelid)

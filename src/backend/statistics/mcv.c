@@ -20,6 +20,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "nodes/nodeFuncs.h"
+#include "rewrite/rewriteManip.h"
 #include "statistics/extended_stats_internal.h"
 #include "statistics/statistics.h"
 #include "utils/array.h"
@@ -1530,9 +1531,13 @@ pg_mcv_list_send(PG_FUNCTION_ARGS)
  * Optionally determines the collation.
  */
 static int
-mcv_match_expression(Node *expr, Bitmapset *keys, List *exprs, Oid *collid)
+mcv_match_expression(PlannerInfo *root, Node *expr, Bitmapset *keys,
+					 List *exprs, Oid *collid)
 {
 	int			idx;
+
+	if (root->outer_join_rels != NULL)
+		expr = remove_nulling_relids(expr, root->outer_join_rels, NULL);
 
 	if (IsA(expr, Var))
 	{
@@ -1645,7 +1650,8 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 				elog(ERROR, "incompatible clause");
 
 			/* match the attribute/expression to a dimension of the statistic */
-			idx = mcv_match_expression(clause_expr, keys, exprs, &collid);
+			idx = mcv_match_expression(root, clause_expr, keys, exprs,
+									   &collid);
 
 			/*
 			 * Walk through the MCV items and evaluate the current clause. We
@@ -1752,7 +1758,8 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			}
 
 			/* match the attribute/expression to a dimension of the statistic */
-			idx = mcv_match_expression(clause_expr, keys, exprs, &collid);
+			idx = mcv_match_expression(root, clause_expr, keys, exprs,
+									   &collid);
 
 			/*
 			 * Walk through the MCV items and evaluate the current clause. We
@@ -1823,7 +1830,8 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			Node	   *clause_expr = (Node *) (expr->arg);
 
 			/* match the attribute/expression to a dimension of the statistic */
-			int			idx = mcv_match_expression(clause_expr, keys, exprs, NULL);
+			int			idx = mcv_match_expression(root, clause_expr, keys,
+												   exprs, NULL);
 
 			/*
 			 * Walk through the MCV items and evaluate the current clause. We
@@ -1942,7 +1950,7 @@ mcv_get_match_bitmap(PlannerInfo *root, List *clauses,
 			int			idx;
 
 			/* match the expression to a dimension of the statistic */
-			idx = mcv_match_expression(clause, keys, exprs, NULL);
+			idx = mcv_match_expression(root, clause, keys, exprs, NULL);
 
 			/*
 			 * Walk through the MCV items and evaluate the current clause. We
