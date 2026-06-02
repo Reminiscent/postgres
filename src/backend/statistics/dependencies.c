@@ -20,6 +20,7 @@
 #include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "parser/parsetree.h"
+#include "rewrite/rewriteManip.h"
 #include "statistics/extended_stats_internal.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
@@ -67,9 +68,10 @@ static AttrNumber *DependencyGenerator_next(DependencyGenerator state);
 static double dependency_degree(StatsBuildData *data, int k, AttrNumber *dependency);
 static bool dependency_is_fully_matched(MVDependency *dependency,
 										Bitmapset *attnums);
-static bool dependency_is_compatible_clause(Node *clause, Index relid,
-											AttrNumber *attnum);
-static bool dependency_is_compatible_expression(Node *clause, Index relid,
+static bool dependency_is_compatible_clause(PlannerInfo *root, Node *clause,
+											Index relid, AttrNumber *attnum);
+static bool dependency_is_compatible_expression(PlannerInfo *root, Node *clause,
+												Index relid,
 												List *statlist, Node **expr);
 static MVDependency *find_strongest_dependency(MVDependencies **dependencies,
 											   int ndependencies, Bitmapset *attnums);
@@ -722,7 +724,8 @@ statext_dependencies_load(Oid mvoid, bool inh)
  * relation, whose attribute number we return in *attnum on success.
  */
 static bool
-dependency_is_compatible_clause(Node *clause, Index relid, AttrNumber *attnum)
+dependency_is_compatible_clause(PlannerInfo *root, Node *clause, Index relid,
+								AttrNumber *attnum)
 {
 	Var		   *var;
 	Node	   *clause_expr;
@@ -730,16 +733,28 @@ dependency_is_compatible_clause(Node *clause, Index relid, AttrNumber *attnum)
 	if (IsA(clause, RestrictInfo))
 	{
 		RestrictInfo *rinfo = (RestrictInfo *) clause;
+		Relids		clause_relids;
+		int			clause_relid;
 
 		/* Pseudoconstants are not interesting (they couldn't contain a Var) */
 		if (rinfo->pseudoconstant)
 			return false;
 
-		/* Clauses referencing multiple, or no, varnos are incompatible */
-		if (bms_membership(rinfo->clause_relids) != BMS_SINGLETON)
+		/* Clauses referencing multiple, no, or other varnos are incompatible */
+		clause_relids = bms_difference(rinfo->clause_relids,
+									   root->outer_join_rels);
+		if (!bms_get_singleton_member(clause_relids, &clause_relid) ||
+			clause_relid != relid)
+		{
+			bms_free(clause_relids);
 			return false;
+		}
+		bms_free(clause_relids);
 
 		clause = (Node *) rinfo->clause;
+		if (bms_overlap(rinfo->clause_relids, root->outer_join_rels))
+			clause = remove_nulling_relids(clause, root->outer_join_rels,
+										   NULL);
 	}
 
 	if (is_opclause(clause))
@@ -831,7 +846,7 @@ dependency_is_compatible_clause(Node *clause, Index relid, AttrNumber *attnum)
 			 * Had we found incompatible clause in the arguments, treat the
 			 * whole clause as incompatible.
 			 */
-			if (!dependency_is_compatible_clause((Node *) lfirst(lc),
+			if (!dependency_is_compatible_clause(root, (Node *) lfirst(lc),
 												 relid, &clause_attnum))
 				return false;
 
@@ -1149,7 +1164,8 @@ clauselist_apply_dependencies(PlannerInfo *root, List *clauses,
  * expression into *expr.
  */
 static bool
-dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, Node **expr)
+dependency_is_compatible_expression(PlannerInfo *root, Node *clause,
+									Index relid, List *statlist, Node **expr)
 {
 	ListCell   *lc,
 			   *lc2;
@@ -1158,16 +1174,28 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 	if (IsA(clause, RestrictInfo))
 	{
 		RestrictInfo *rinfo = (RestrictInfo *) clause;
+		Relids		clause_relids;
+		int			clause_relid;
 
 		/* Pseudoconstants are not interesting (they couldn't contain a Var) */
 		if (rinfo->pseudoconstant)
 			return false;
 
-		/* Clauses referencing multiple, or no, varnos are incompatible */
-		if (bms_membership(rinfo->clause_relids) != BMS_SINGLETON)
+		/* Clauses referencing multiple, no, or other varnos are incompatible */
+		clause_relids = bms_difference(rinfo->clause_relids,
+									   root->outer_join_rels);
+		if (!bms_get_singleton_member(clause_relids, &clause_relid) ||
+			clause_relid != relid)
+		{
+			bms_free(clause_relids);
 			return false;
+		}
+		bms_free(clause_relids);
 
 		clause = (Node *) rinfo->clause;
+		if (bms_overlap(rinfo->clause_relids, root->outer_join_rels))
+			clause = remove_nulling_relids(clause, root->outer_join_rels,
+										   NULL);
 	}
 
 	if (is_opclause(clause))
@@ -1258,7 +1286,8 @@ dependency_is_compatible_expression(Node *clause, Index relid, List *statlist, N
 			 * Had we found incompatible expression in the arguments, treat
 			 * the whole expression as incompatible.
 			 */
-			if (!dependency_is_compatible_expression((Node *) lfirst(lc), relid,
+			if (!dependency_is_compatible_expression(root, (Node *) lfirst(lc),
+													 relid,
 													 statlist, &or_expr))
 				return false;
 
@@ -1425,11 +1454,13 @@ dependencies_clauselist_selectivity(PlannerInfo *root,
 			 * it's an expression, assign a negative attnum as if it was a
 			 * system attribute.
 			 */
-			if (dependency_is_compatible_clause(clause, rel->relid, &attnum))
+			if (dependency_is_compatible_clause(root, clause, rel->relid,
+												&attnum))
 			{
 				list_attnums[listidx] = attnum;
 			}
-			else if (dependency_is_compatible_expression(clause, rel->relid,
+			else if (dependency_is_compatible_expression(root, clause,
+														 rel->relid,
 														 rel->statlist,
 														 &expr))
 			{
