@@ -230,7 +230,8 @@ static RelOptInfo *create_ordered_paths(PlannerInfo *root,
 										RelOptInfo *input_rel,
 										PathTarget *target,
 										bool target_parallel_safe,
-										double limit_tuples);
+										double limit_tuples,
+										bool consider_presort_projection);
 static PathTarget *make_group_input_target(PlannerInfo *root,
 										   PathTarget *final_target);
 static PathTarget *make_partial_grouping_target(PlannerInfo *root,
@@ -248,7 +249,8 @@ static List *make_pathkeys_for_window(PlannerInfo *root, WindowClause *wc,
 									  List *tlist);
 static PathTarget *make_sort_input_target(PlannerInfo *root,
 										  PathTarget *final_target,
-										  bool *have_postponed_srfs);
+										  bool *have_postponed_srfs,
+										  bool *consider_presort_projection);
 static void adjust_paths_for_srfs(PlannerInfo *root, RelOptInfo *rel,
 								  List *targets, List *targets_contain_srfs);
 static void add_paths_to_grouping_rel(PlannerInfo *root, RelOptInfo *input_rel,
@@ -1780,6 +1782,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 	int64		count_est = 0;
 	double		limit_tuples = -1.0;
 	bool		have_postponed_srfs = false;
+	bool		consider_presort_projection = false;
 	PathTarget *final_target;
 	List	   *final_targets;
 	List	   *final_targets_contain_srfs;
@@ -2016,7 +2019,8 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		{
 			sort_input_target = make_sort_input_target(root,
 													   final_target,
-													   &have_postponed_srfs);
+													   &have_postponed_srfs,
+													   &consider_presort_projection);
 			sort_input_target_parallel_safe =
 				is_parallel_safe(root, (Node *) sort_input_target->exprs);
 		}
@@ -2024,6 +2028,7 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 		{
 			sort_input_target = final_target;
 			sort_input_target_parallel_safe = final_target_parallel_safe;
+			consider_presort_projection = false;
 		}
 
 		/*
@@ -2195,7 +2200,8 @@ grouping_planner(PlannerInfo *root, double tuple_fraction,
 										   final_target,
 										   final_target_parallel_safe,
 										   have_postponed_srfs ? -1.0 :
-										   limit_tuples);
+										   limit_tuples,
+										   consider_presort_projection);
 		/* Fix things up if final_target contains SRFs */
 		if (parse->hasTargetSRFs)
 			adjust_paths_for_srfs(root, current_rel,
@@ -5634,6 +5640,8 @@ get_useful_pathkeys_for_distinct(PlannerInfo *root, List *needed_pathkeys,
  * target: the output tlist the result Paths must emit
  * limit_tuples: estimated bound on the number of output tuples,
  *		or -1 if no LIMIT or couldn't estimate
+ * consider_presort_projection: whether to consider computing the final target
+ *		before sorting as an alternative to a post-sort projection
  *
  * XXX This only looks at sort_pathkeys. I wonder if it needs to look at the
  * other pathkeys (grouping, ...) like generate_useful_gather_paths.
@@ -5643,7 +5651,8 @@ create_ordered_paths(PlannerInfo *root,
 					 RelOptInfo *input_rel,
 					 PathTarget *target,
 					 bool target_parallel_safe,
-					 double limit_tuples)
+					 double limit_tuples,
+					 bool consider_presort_projection)
 {
 	Path	   *cheapest_input_path = input_rel->cheapest_total_path;
 	RelOptInfo *ordered_rel;
@@ -5714,6 +5723,41 @@ create_ordered_paths(PlannerInfo *root,
 																	root->sort_pathkeys,
 																	presorted_keys,
 																	limit_tuples);
+		}
+
+		/*
+		 * If make_sort_input_target() chose a narrower target only as a
+		 * cost-based option, also consider computing the final target before
+		 * sorting.  The two alternatives use the normal path cost machinery
+		 * to decide whether the extra post-sort projection is worthwhile.
+		 */
+		if (consider_presort_projection &&
+			!equal(input_path->pathtarget->exprs, target->exprs))
+		{
+			Path	   *presort_path;
+			Path	   *presorted_path;
+
+			presort_path = (Path *)
+				create_projection_path(root, input_rel, input_path, target);
+
+			if (is_sorted)
+				presorted_path = presort_path;
+			else if (presorted_keys == 0 || !enable_incremental_sort)
+				presorted_path = (Path *) create_sort_path(root,
+														   ordered_rel,
+														   presort_path,
+														   root->sort_pathkeys,
+														   limit_tuples);
+			else
+				presorted_path =
+					(Path *) create_incremental_sort_path(root,
+														  ordered_rel,
+														  presort_path,
+														  root->sort_pathkeys,
+														  presorted_keys,
+														  limit_tuples);
+
+			add_path(ordered_rel, presorted_path);
 		}
 
 		/*
@@ -5789,6 +5833,46 @@ create_ordered_paths(PlannerInfo *root,
 																	root->sort_pathkeys,
 																	presorted_keys,
 																	limit_tuples);
+
+			/*
+			 * See the non-partial path case above for why we consider this
+			 * extra alternative.
+			 */
+			if (consider_presort_projection &&
+				!equal(input_path->pathtarget->exprs, target->exprs))
+			{
+				Path	   *presort_path;
+				Path	   *presorted_path;
+
+				presort_path = (Path *)
+					create_projection_path(root, input_rel, input_path, target);
+
+				if (presorted_keys == 0 || !enable_incremental_sort)
+					presorted_path = (Path *) create_sort_path(root,
+															   ordered_rel,
+															   presort_path,
+															   root->sort_pathkeys,
+															   limit_tuples);
+				else
+					presorted_path =
+						(Path *) create_incremental_sort_path(root,
+															  ordered_rel,
+															  presort_path,
+															  root->sort_pathkeys,
+															  presorted_keys,
+															  limit_tuples);
+
+				total_groups = compute_gather_rows(presorted_path);
+				presorted_path = (Path *)
+					create_gather_merge_path(root, ordered_rel,
+											 presorted_path,
+											 presorted_path->pathtarget,
+											 root->sort_pathkeys, NULL,
+											 &total_groups);
+
+				add_path(ordered_rel, presorted_path);
+			}
+
 			total_groups = compute_gather_rows(sorted_path);
 			sorted_path = (Path *)
 				create_gather_merge_path(root, ordered_rel,
@@ -6719,7 +6803,10 @@ typedef struct SortInputTargetCol
  * Once a post-sort projection is needed, we also postpone non-sort expressions
  * whose inputs will be available below the Sort anyway.  This can avoid
  * evaluating those expressions before Sort without adding another projection
- * step or making the Sort carry more input values.
+ * step or making the Sort carry more input values.  If partial evaluation of
+ * the query is possible, we may also form such a target as a cost-based option;
+ * create_ordered_paths() will compare that against computing the final target
+ * before sorting.
  *
  * Another issue that could potentially be considered here is that
  * evaluating tlist expressions could result in data that's either wider
@@ -6744,18 +6831,23 @@ typedef struct SortInputTargetCol
  *
  * 'final_target' is the query's final target list (in PathTarget form)
  * 'have_postponed_srfs' is an output argument, see below
+ * 'consider_presort_projection' is an output argument, see below
  *
  * The result is the PathTarget to be computed by the plan node immediately
  * below the Sort step (and the Distinct step, if any).  This will be
  * exactly final_target if we decide a projection step wouldn't be helpful.
  *
  * In addition, *have_postponed_srfs is set to true if we choose to postpone
- * any set-returning functions to after the Sort.
+ * any set-returning functions to after the Sort.  *consider_presort_projection
+ * is set to true if the returned target differs from final_target only because
+ * of optimization-only postponement that should be costed against computing the
+ * final target before Sort.
  */
 static PathTarget *
 make_sort_input_target(PlannerInfo *root,
 					   PathTarget *final_target,
-					   bool *have_postponed_srfs)
+					   bool *have_postponed_srfs,
+					   bool *consider_presort_projection)
 {
 	Query	   *parse = root->parse;
 	PathTarget *input_target;
@@ -6777,6 +6869,7 @@ make_sort_input_target(PlannerInfo *root,
 	Assert(parse->sortClause);
 
 	*have_postponed_srfs = false;	/* default result */
+	*consider_presort_projection = false;
 
 	/* Inspect tlist and collect per-column information */
 	ncols = list_length(final_target->exprs);
@@ -6881,12 +6974,12 @@ make_sort_input_target(PlannerInfo *root,
 	/*
 	 * We can postpone additional non-sort output expressions if doing so
 	 * doesn't require carrying any extra Vars, PlaceHolderVars, Aggrefs, or
-	 * WindowFuncs through the Sort.  However, do not add a post-sort projection
-	 * for this reason alone; just piggyback on a projection that is already
-	 * needed.
+	 * WindowFuncs through the Sort.  If this is not just piggybacking on a
+	 * projection that is already needed, use it only as a cost-based option
+	 * when partial evaluation of the query is possible.
 	 */
 	have_no_extra_input_postpone = false;
-	if (need_postsort_projection)
+	if (need_postsort_projection || root->tuple_fraction > 0)
 	{
 		List	   *required_exprs = NIL;
 		List	   *base_postponable_cols = NIL;
@@ -6987,6 +7080,9 @@ make_sort_input_target(PlannerInfo *root,
 	 */
 	if (!(need_postsort_projection || have_no_extra_input_postpone))
 		return final_target;
+
+	if (have_no_extra_input_postpone && !need_postsort_projection)
+		*consider_presort_projection = true;
 
 	/*
 	 * Report whether the post-sort projection will contain set-returning
