@@ -6678,6 +6678,7 @@ typedef struct SortInputTargetCol
 	Expr	   *expr;
 	Index		sortgroupref;
 	bool		is_srf;
+	bool		is_expensive;
 	bool		postpone;
 }			SortInputTargetCol;
 
@@ -6715,6 +6716,10 @@ typedef struct SortInputTargetCol
  * to have to evaluate the expressions for every row anyway), or if there are
  * any volatile or set-returning expressions (since once we've put in a
  * projection at all, it won't cost any more to postpone more stuff).
+ * Once a post-sort projection is needed, we also postpone non-sort expressions
+ * whose inputs will be available below the Sort anyway.  This can avoid
+ * evaluating those expressions before Sort without adding another projection
+ * step or making the Sort carry more input values.
  *
  * Another issue that could potentially be considered here is that
  * evaluating tlist expressions could result in data that's either wider
@@ -6761,6 +6766,8 @@ make_sort_input_target(PlannerInfo *root,
 	bool		have_expensive;
 	bool		have_srf_sortcols;
 	bool		postpone_srfs;
+	bool		need_postsort_projection;
+	bool		have_no_extra_input_postpone;
 	List	   *postponable_cols;
 	List	   *postponable_vars;
 	int			i;
@@ -6830,7 +6837,7 @@ make_sort_input_target(PlannerInfo *root,
 				 */
 				if (cost.per_tuple > 10 * cpu_operator_cost)
 				{
-					col->postpone = true;
+					col->is_expensive = true;
 					have_expensive = true;
 				}
 			}
@@ -6853,11 +6860,132 @@ make_sort_input_target(PlannerInfo *root,
 	postpone_srfs = (have_srf && !have_srf_sortcols);
 
 	/*
+	 * Keep the historical expensive-expression policy: once we're adding a
+	 * post-sort projection for any reason, postpone all expensive
+	 * expressions.
+	 */
+	need_postsort_projection =
+		postpone_srfs || have_volatile ||
+		(have_expensive && (parse->limitCount || root->tuple_fraction > 0));
+	if (need_postsort_projection)
+	{
+		i = 0;
+		foreach(lc, final_target->exprs)
+		{
+			if (colinfo[i].is_expensive)
+				colinfo[i].postpone = true;
+			i++;
+		}
+	}
+
+	/*
+	 * We can postpone additional non-sort output expressions if doing so
+	 * doesn't require carrying any extra Vars, PlaceHolderVars, Aggrefs, or
+	 * WindowFuncs through the Sort.  However, do not add a post-sort projection
+	 * for this reason alone; just piggyback on a projection that is already
+	 * needed.
+	 */
+	have_no_extra_input_postpone = false;
+	if (need_postsort_projection)
+	{
+		List	   *required_exprs = NIL;
+		List	   *base_postponable_cols = NIL;
+		List	   *base_postponable_vars;
+		List	   *required_before_sort;
+
+		/*
+		 * Build the set of expressions that will already be carried through
+		 * the Sort: non-postponed columns, plus Vars/PHVs etc. needed for
+		 * already-postponed columns.
+		 */
+		i = 0;
+		foreach(lc, final_target->exprs)
+		{
+			SortInputTargetCol *col = &colinfo[i];
+
+			if (col->postpone || (postpone_srfs && col->is_srf))
+				base_postponable_cols = lappend(base_postponable_cols,
+												col->expr);
+			else
+				required_exprs = lappend(required_exprs, col->expr);
+			i++;
+		}
+
+		base_postponable_vars =
+			pull_var_clause((Node *) base_postponable_cols,
+							PVC_INCLUDE_AGGREGATES |
+							PVC_INCLUDE_WINDOWFUNCS |
+							PVC_INCLUDE_PLACEHOLDERS);
+		required_before_sort = list_union(required_exprs,
+										  base_postponable_vars);
+
+		/*
+		 * Ignore simple columns, since postponing them would not avoid any
+		 * expression evaluation.  Also ignore expressions that do not depend
+		 * on any input values, so we don't add a projection just for
+		 * constants or other no-input expressions.
+		 */
+		i = 0;
+		foreach(lc, final_target->exprs)
+		{
+			SortInputTargetCol *col = &colinfo[i];
+			List	   *expr_vars;
+			ListCell   *lc2;
+			bool		safe;
+
+			if (col->postpone || (postpone_srfs && col->is_srf) ||
+				col->is_srf ||
+				col->sortgroupref != 0 ||
+				IsA(col->expr, Var) ||
+				IsA(col->expr, Aggref) ||
+				IsA(col->expr, WindowFunc) ||
+				IsA(col->expr, PlaceHolderVar))
+			{
+				i++;
+				continue;
+			}
+
+			expr_vars = pull_var_clause((Node *) col->expr,
+										PVC_INCLUDE_AGGREGATES |
+										PVC_INCLUDE_WINDOWFUNCS |
+										PVC_INCLUDE_PLACEHOLDERS);
+			if (expr_vars == NIL)
+			{
+				i++;
+				continue;
+			}
+
+			safe = true;
+			foreach(lc2, expr_vars)
+			{
+				if (!list_member(required_before_sort, lfirst(lc2)))
+				{
+					safe = false;
+					break;
+				}
+			}
+
+			if (safe)
+			{
+				col->postpone = true;
+				have_no_extra_input_postpone = true;
+			}
+
+			list_free(expr_vars);
+			i++;
+		}
+
+		/* clean up cruft */
+		list_free(required_before_sort);
+		list_free(base_postponable_vars);
+		list_free(base_postponable_cols);
+		list_free(required_exprs);
+	}
+
+	/*
 	 * If we don't need a post-sort projection, just return final_target.
 	 */
-	if (!(postpone_srfs || have_volatile ||
-		  (have_expensive &&
-		   (parse->limitCount || root->tuple_fraction > 0))))
+	if (!(need_postsort_projection || have_no_extra_input_postpone))
 		return final_target;
 
 	/*
