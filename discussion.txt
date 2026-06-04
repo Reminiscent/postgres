@@ -1,0 +1,608 @@
+Unfortunate pushing down of expressions below sort
+Lists:	pgsql-hackers
+From:	Andres Freund <andres(at)anarazel(dot)de>
+To:	pgsql-hackers(at)postgresql(dot)org
+Cc:	David Rowley <dgrowleyml(at)gmail(dot)com>
+Subject:	Unfortunate pushing down of expressions below sort
+Date:	2026-02-05 20:52:30
+Message-ID:	qddu2agmbiadpqkavqlamccrqxg6rm64sdq6q7ihpyndyfim6k@2dpox3fupa2g
+Views:	Whole Thread | Raw Message | Download mbox | Resend email
+Lists:	pgsql-hackers
+Hi,
+
+
+
+I was recently [1] reminded of something I've seen be problematic before:
+
+
+
+We push down expressions below a sort node, even though they could be
+evaluated above. That can very substantially increase the space needed for the
+sort.
+
+
+
+A simplified (and extreme-y-fied) example:
+
+
+
+EXPLAIN (VERBOSE, ANALYZE) SELECT repeat(g.i::text, 1000) FROM generate_series(1, 10000) g(i) ORDER BY g.i;
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                   QUERY PLAN                                                                   │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Sort  (cost=839.39..864.39 rows=10000 width=36) (actual time=65.905..66.552 rows=10000.00 loops=1)                                             │
+│   Output: (repeat((i)::text, 1000)), i                                                                                                         │
+│   Sort Key: g.i                                                                                                                                │
+│   Sort Method: quicksort  Memory: 38601kB                                                                                                      │
+│   ->  Function Scan on pg_catalog.generate_series g  (cost=0.00..175.00 rows=10000 width=36) (actual time=0.896..48.459 rows=10000.00 loops=1) │
+│         Output: repeat((i)::text, 1000), i                                                                                                     │
+│         Function Call: generate_series(1, 10000)                                                                                               │
+│ Planning Time: 0.063 ms                                                                                                                        │
+│ Execution Time: 69.253 ms                                                                                                                      │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+(9 rows)
+
+
+
+I can manually rewrite that be executed better:
+
+
+
+EXPLAIN (VERBOSE, ANALYZE) SELECT repeat(i::text, 1000) FROM (SELECT * FROM generate_series(1, 10000) g(i) ORDER BY g.i);
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                     QUERY PLAN                                                                     │
+├────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Subquery Scan on unnamed_subquery  (cost=764.39..864.39 rows=10000 width=32) (actual time=2.642..50.738 rows=10000.00 loops=1)                     │
+│   Output: repeat((unnamed_subquery.i)::text, 1000)                                                                                                 │
+│   ->  Sort  (cost=764.39..789.39 rows=10000 width=4) (actual time=2.633..3.342 rows=10000.00 loops=1)                                              │
+│         Output: g.i                                                                                                                                │
+│         Sort Key: g.i                                                                                                                              │
+│         Sort Method: quicksort  Memory: 385kB                                                                                                      │
+│         ->  Function Scan on pg_catalog.generate_series g  (cost=0.00..100.00 rows=10000 width=4) (actual time=0.999..1.690 rows=10000.00 loops=1) │
+│               Output: g.i                                                                                                                          │
+│               Function Call: generate_series(1, 10000)                                                                                             │
+│ Planning Time: 0.063 ms                                                                                                                            │
+│ Execution Time: 51.648 ms                                                                                                                          │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+(11 rows)
+
+
+
+Note that the runtime as well as the memory usage are reduced noticeably.
+
+
+
+It's even worse when there is a LIMIT above the sort, because it leads to
+evaluating the expression way more often than needed:
+
+
+
+EXPLAIN (VERBOSE, ANALYZE) SELECT repeat(g.i::text, 1000) FROM generate_series(1, 10000) g(i) ORDER BY g.i LIMIT 10;
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                      QUERY PLAN                                                                      │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Limit  (cost=391.10..391.12 rows=10 width=36) (actual time=50.910..50.912 rows=10.00 loops=1)                                                        │
+│   Output: (repeat((i)::text, 1000)), i                                                                                                               │
+│   ->  Sort  (cost=391.10..416.10 rows=10000 width=36) (actual time=50.908..50.909 rows=10.00 loops=1)                                                │
+│         Output: (repeat((i)::text, 1000)), i                                                                                                         │
+│         Sort Key: g.i                                                                                                                                │
+│         Sort Method: top-N heapsort  Memory: 36kB                                                                                                    │
+│         ->  Function Scan on pg_catalog.generate_series g  (cost=0.00..175.00 rows=10000 width=36) (actual time=0.869..47.820 rows=10000.00 loops=1) │
+│               Output: repeat((i)::text, 1000), i                                                                                                     │
+│               Function Call: generate_series(1, 10000)                                                                                               │
+│ Planning Time: 0.074 ms                                                                                                                              │
+│ Execution Time: 50.938 ms                                                                                                                            │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+(11 rows)
+
+
+
+vs:
+
+
+
+EXPLAIN (VERBOSE, ANALYZE) SELECT repeat(i::text, 1000) FROM (SELECT * FROM generate_series(1, 10000) g(i) ORDER BY g.i LIMIT 10);
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                        QUERY PLAN                                                                        │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Subquery Scan on unnamed_subquery  (cost=316.10..316.20 rows=10 width=32) (actual time=3.098..3.149 rows=10.00 loops=1)                                  │
+│   Output: repeat((unnamed_subquery.i)::text, 1000)                                                                                                       │
+│   ->  Limit  (cost=316.10..316.12 rows=10 width=4) (actual time=3.086..3.090 rows=10.00 loops=1)                                                         │
+│         Output: g.i                                                                                                                                      │
+│         ->  Sort  (cost=316.10..341.10 rows=10000 width=4) (actual time=3.083..3.085 rows=10.00 loops=1)                                                 │
+│               Output: g.i                                                                                                                                │
+│               Sort Key: g.i                                                                                                                              │
+│               Sort Method: top-N heapsort  Memory: 25kB                                                                                                  │
+│               ->  Function Scan on pg_catalog.generate_series g  (cost=0.00..100.00 rows=10000 width=4) (actual time=1.482..2.244 rows=10000.00 loops=1) │
+│                     Output: g.i                                                                                                                          │
+│                     Function Call: generate_series(1, 10000)                                                                                             │
+│ Planning Time: 0.073 ms                                                                                                                                  │
+│ Execution Time: 3.185 ms                                                                                                                                 │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+
+Now, a repeat(,1000) is obviously a silly example, but I think this is a real
+issue. In the case in [1], deferring the evaluation of acldefault() till after
+the sort reduces memory consumption by ~38%
+
+
+
+Why are we evaluating the expression below the sort instead of above? I can
+maybe see an argument for doing that if it's volatile, but it's not.
+
+
+
+Interestingly we seem to do the sane thing for aggregation:
+
+
+
+EXPLAIN (VERBOSE, ANALYZE) SELECT repeat(g.i::text, 1000) FROM generate_series(1, 10000) g(i) GROUP BY g.i;
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                  QUERY PLAN                                                                  │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ HashAggregate  (cost=125.00..128.50 rows=200 width=36) (actual time=4.575..52.142 rows=10000.00 loops=1)                                     │
+│   Output: repeat((i)::text, 1000), i                                                                                                         │
+│   Group Key: g.i                                                                                                                             │
+│   Batches: 1  Memory Usage: 553kB                                                                                                            │
+│   ->  Function Scan on pg_catalog.generate_series g  (cost=0.00..100.00 rows=10000 width=4) (actual time=0.897..1.518 rows=10000.00 loops=1) │
+│         Output: i                                                                                                                            │
+│         Function Call: generate_series(1, 10000)                                                                                             │
+│ Planning Time: 0.042 ms                                                                                                                      │
+│ Execution Time: 53.126 ms                                                                                                                    │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+(9 rows)
+
+
+
+Note that the repeat() is computed above the aggregate. That also is true if
+it's a sort based agg...
+
+
+
+Greetings,
+
+
+
+Andres Freund
+
+
+
+[1] https://postgr.es/m/wgf63h3doepg2jnmofzbygrg7jujbjvxwkvoc7arej2zqcuf6c%403tzz22tizuew
+
+
+
+From:	Tom Lane <tgl(at)sss(dot)pgh(dot)pa(dot)us>
+To:	Andres Freund <andres(at)anarazel(dot)de>
+Cc:	pgsql-hackers(at)postgresql(dot)org, David Rowley <dgrowleyml(at)gmail(dot)com>
+Subject:	Re: Unfortunate pushing down of expressions below sort
+Date:	2026-02-06 00:13:09
+Message-ID:	1668738.1770336789@sss.pgh.pa.us
+Views:	Whole Thread | Raw Message | Download mbox | Resend email
+Lists:	pgsql-hackers
+Andres Freund <andres(at)anarazel(dot)de> writes:
+> We push down expressions below a sort node, even though they could be
+> evaluated above.
+
+
+
+Yeah.  That's a hangover from an ancient decision that sort/limit
+would always be applied at the top of the plan tree.  I'm too
+lazy to check the details right now, but I think we already relaxed
+that in some cases (or maybe it was about evaluating stuff
+before/after GROUP BY?).
+
+
+
+> That can very substantially increase the space needed for the
+> sort.
+
+
+
+Could decrease it too, eg if what you are outputting is
+md5(some-wide-column).  Not sure we are smart enough to tell
+which way is better.
+
+
+
+			regards, tom lane
+
+
+
+From:	Tom Lane <tgl(at)sss(dot)pgh(dot)pa(dot)us>
+To:	Andres Freund <andres(at)anarazel(dot)de>
+Cc:	pgsql-hackers(at)postgresql(dot)org, David Rowley <dgrowleyml(at)gmail(dot)com>
+Subject:	Re: Unfortunate pushing down of expressions below sort
+Date:	2026-02-06 01:02:31
+Message-ID:	1674012.1770339751@sss.pgh.pa.us
+Views:	Whole Thread | Raw Message | Download mbox | Resend email
+Lists:	pgsql-hackers
+I wrote:
+> Yeah.  That's a hangover from an ancient decision that sort/limit
+> would always be applied at the top of the plan tree.  I'm too
+> lazy to check the details right now, but I think we already relaxed
+> that in some cases (or maybe it was about evaluating stuff
+> before/after GROUP BY?).
+
+
+
+Ah, right: see make_sort_input_target() and its very extensive
+comment in planner.c.  I wonder why that didn't trigger in
+your example.
+
+
+
+			regards, tom lane
+
+
+
+From:	Chengpeng Yan <chengpeng_yan(at)outlook(dot)com>
+To:	Tom Lane <tgl(at)sss(dot)pgh(dot)pa(dot)us>, Andres Freund <andres(at)anarazel(dot)de>
+Cc:	PostgreSQL-development <pgsql-hackers(at)postgresql(dot)org>, David Rowley <dgrowleyml(at)gmail(dot)com>
+Subject:	Re: Unfortunate pushing down of expressions below sort
+Date:	2026-02-06 14:37:59
+Message-ID:	988146DB-C16A-487C-8C39-656C702EF4E2@Outlook.com
+Views:	Whole Thread | Raw Message | Download mbox | Resend email
+Lists:	pgsql-hackers
+Hi,
+
+
+
+I took a closer look at make_sort_input_target() in
+src/backend/optimizer/plan/planner.c.
+
+
+
+The current heuristics only defer targetlist expressions past a Sort
+when they are: 
+* volatile, or 
+* set-returning (due to SRF synchronization constraints), or 
+* considered “expensive” (cost > 10 * cpu_operator_cost) and there is a
+LIMIT.
+
+
+
+Functions like repeat() and acldefault() have the default procost = 1,
+so they don’t meet the “expensive” threshold and therefore remain below
+the Sort, which is what leads to the tuple width inflation seen in these
+examples.
+
+
+
+Grouping behaves differently: make_group_input_target() unconditionally
+flattens non-grouping expressions to Vars, which is why repeat() ends up
+above the Aggregate node there.
+
+
+
+Tom mentioned the md5(widecol) counterexample, where evaluating the
+expression before the sort can actually reduce memory usage. The key
+distinction seems to be whether the expression depends solely on sort
+keys.
+
+
+
+The approach I’m experimenting with is to defer an expression only when
+all the Vars it depends on are sort keys. That gives the desired
+behavior in both cases: 
+* repeat(i, 1000) ORDER BY i: i is the sort key, so we defer and keep
+the sort tuples narrow. 
+* md5(widecol) ORDER BY id: widecol is not a sort key, so we keep the
+expression below the sort and avoid carrying the wide column.
+
+
+
+This seems to address the cases discussed in this thread and should be
+low-risk for the common case.
+
+
+
+I’m working on a patch along these lines; any thoughts?
+
+
+
+--
+Best regards,
+Chengpeng Yan
+
+
+
+From:	Chengpeng Yan <chengpeng_yan(at)Outlook(dot)com>
+To:	Tom Lane <tgl(at)sss(dot)pgh(dot)pa(dot)us>, Andres Freund <andres(at)anarazel(dot)de>
+Cc:	PostgreSQL-development <pgsql-hackers(at)postgresql(dot)org>, David Rowley <dgrowleyml(at)gmail(dot)com>
+Subject:	Re: Unfortunate pushing down of expressions below sort
+Date:	2026-02-07 12:46:15
+Message-ID:	3F7BA12C-7158-4E78-A8F8-A17FE5F6CCF0@Outlook.com
+Views:	Whole Thread | Raw Message | Download mbox | Resend email
+Lists:	pgsql-hackers
+Hi,
+
+
+
+Following up on the discussion below, I now have a patch.
+
+
+
+The patch extends make_sort_input_target() with a conservative rule:
+defer additional non-sort targetlist expressions past Sort only when
+doing so does not require carrying any additional Vars/PlaceHolderVars
+through Sort. This way, Sort input width never increases.
+
+
+
+This still allows cases like repeat(i::text, ...) ORDER BY i to be
+projected above Sort, while avoiding the md5(widecol) counterexample
+mentioned earlier, since such expressions are not deferred when they
+would force a wide non-sort column through Sort.
+
+
+
+One limitation remains: this can't help queries like
+'SELECT repeat(i::text, ...) FROM t ORDER BY othercols;'
+where the output expression depends on Vars that are not sort keys. In
+that case we still have to carry i through the Sort to be able to
+compute the final targetlist, so the patch cannot avoid inflating Sort's
+input width (and may still evaluate repeat() before Sort, depending on
+the existing projection placement rules).
+
+
+
+The existing volatile/SRF/expensive behavior is unchanged (expensive
+exprs are still postponed once a post-sort projection is needed).
+
+
+
+I also added regression coverage (including an md5(widecol)-style case).
+Some existing EXPLAIN outputs (e.g. join/groupingsets) now show a Result
+above Sort, which is expected from postponing additional non-sort
+outputs.
+
+
+
+Patch attached. Comments welcome.
+
+
+
+--
+Best regards,
+Chengpeng Yan
+
+Attachment	Content-Type	Size
+v1-0001-planner-postpone-some-non-sort-output-expressions.patch	application/octet-stream	19.8 KB
+From:	Chengpeng Yan <chengpeng_yan(at)Outlook(dot)com>
+To:	Tom Lane <tgl(at)sss(dot)pgh(dot)pa(dot)us>, Andres Freund <andres(at)anarazel(dot)de>
+Cc:	PostgreSQL-development <pgsql-hackers(at)postgresql(dot)org>, David Rowley <dgrowleyml(at)gmail(dot)com>
+Subject:	Re: Unfortunate pushing down of expressions below sort
+Date:	2026-02-11 14:17:01
+Message-ID:	13636E54-C27A-4A49-926D-B9E3EBAA8A10@Outlook.com
+Views:	Whole Thread | Raw Message | Download mbox | Resend email
+Lists:	pgsql-hackers
+Hi,
+
+
+
+I've attached v2 of the patch.
+
+
+
+Changes since v1:
+- No planner logic changes.
+- Fixed one regression-test fallout in contrib/postgres_fdw by updating
+expected EXPLAIN output. With the planner change, the deparsed remote
+SQL can omit a redundant constant there, so GROUP BY positional
+references shift accordingly; query results are unchanged.
+
+
+
+Behavior is unchanged from v1:
+- Postpone additional non-sort target expressions only when doing so
+does not require carrying any extra Vars/PlaceHolderVars through Sort.
+- Existing volatile/SRF/expensive-expression behavior is unchanged.
+
+
+
+Validation:
+- make check-world passes.
+
+
+
+Would especially appreciate feedback on whether the “no extra Vars/PHVs
+through sort” rule is the right safety boundary.
+
+
+
+Thanks!
+
+
+
+--
+Best regards,
+Chengpeng Yan
+
+
+
+Attachment	Content-Type	Size
+v2-0001-planner-postpone-some-non-sort-output-expressions.patch	application/octet-stream	21.2 KB
+From:	Tom Lane <tgl(at)sss(dot)pgh(dot)pa(dot)us>
+To:	Chengpeng Yan <chengpeng_yan(at)Outlook(dot)com>
+Cc:	Andres Freund <andres(at)anarazel(dot)de>, PostgreSQL-development <pgsql-hackers(at)postgresql(dot)org>, David Rowley <dgrowleyml(at)gmail(dot)com>
+Subject:	Re: Unfortunate pushing down of expressions below sort
+Date:	2026-04-07 20:16:54
+Message-ID:	2351008.1775593014@sss.pgh.pa.us
+Views:	Whole Thread | Raw Message | Download mbox | Resend email
+Lists:	pgsql-hackers
+Chengpeng Yan <chengpeng_yan(at)Outlook(dot)com> writes:
+> Following up on the discussion below, I now have a patch.
+
+
+
+> The patch extends make_sort_input_target() with a conservative rule:
+> defer additional non-sort targetlist expressions past Sort only when
+> doing so does not require carrying any additional Vars/PlaceHolderVars
+> through Sort. This way, Sort input width never increases.
+
+
+
+I spent some time thinking about this.
+
+
+
+One thing I think we need to keep in mind is that if we don't postpone
+an expression past Sort, and the user doesn't like that, she can
+easily rewrite the query to force it; as indeed Andres demonstrated
+at the start of this thread.  But overriding an unwanted planner
+decision to postpone is harder.  I think you can do it with
+
+
+
+SELECT * FROM (SELECT x,y,f(z) FROM ... OFFSET 0) ORDER BY whatever;
+
+
+
+but if you forget the OFFSET-0 optimization fence you may find
+f(z) getting evaluated after the sort anyway.  And the fence might
+foreclose some other optimization you did want.
+
+
+
+Also, make_sort_input_target() has gone basically unchanged since
+2016, without that many complaints.  So I think we need to be pretty
+conservative about adding postponement choices that aren't forced by
+semantic requirements.
+
+
+
+The rule stated above seems pretty conservative, but either it's not
+conservative enough or you didn't implement it right, because the
+regression test changes show the v2 patch is very willing to create
+Result nodes where there were none before, even when there's no LIMIT
+and thus no reason to think we can save any expression evaluations.
+That extra plan node has nonzero cost that I don't think you're
+accounting for.  It'll still be a win if enough data volume is removed
+from the Sort step, but I don't see any consideration of how much
+we're actually saving before deciding to add the projection step.
+
+
+
+So I think we need some sort of gating rule, whereby we only postpone
+these expressions if (a) there was already a reason to add a
+projection or (b) we can make some cost-based or at least heuristic
+estimate that says we'll cut the sort data volume significantly.
+Maybe (b) needs to interact with the existing heuristic about
+postponing expensive expressions, not sure.
+
+
+
+Independently of that, I don't especially like the changes in
+make_sort_input_target().  They seem rather inelegant and expensive
+(and underdocumented), as well as duplicative of other work already
+being done in the function.  It may be time to tackle the unfinished
+work mentioned in the existing comments about avoiding redundant
+cost/width calculations ...
+
+
+
+			regards, tom lane
+
+
+
+From:	Andres Freund <andres(at)anarazel(dot)de>
+To:	Tom Lane <tgl(at)sss(dot)pgh(dot)pa(dot)us>
+Cc:	Chengpeng Yan <chengpeng_yan(at)outlook(dot)com>, PostgreSQL-development <pgsql-hackers(at)postgresql(dot)org>, David Rowley <dgrowleyml(at)gmail(dot)com>
+Subject:	Re: Unfortunate pushing down of expressions below sort
+Date:	2026-04-07 21:01:43
+Message-ID:	nggrz464c7hqsy45f7pymfn7mk7qaupcjc6jmsdcgwcshakabq@lwh7d4igd77o
+Views:	Whole Thread | Raw Message | Download mbox | Resend email
+Lists:	pgsql-hackers
+Hi,
+
+
+
+On 2026-04-07 16:16:54 -0400, Tom Lane wrote:
+> That extra plan node has nonzero cost that I don't think you're
+> accounting for.  It'll still be a win if enough data volume is removed
+> from the Sort step, but I don't see any consideration of how much
+> we're actually saving before deciding to add the projection step.
+
+
+
+A different way (compared to the heuristics you were subsequently talking
+about) to deal with that could be to add projection support to sort's output,
+I guess. That would have a considerably smaller cost than a separate node.
+
+
+
+It'd add a tiny bit of cost (an if checking for projection) for the rather
+common of a sort without a projection.  Although that'd not be too hard to get
+rid of by generating specialized ExecSort() variants for the different cases,
+like now done for ExecSeqScan, if it turned out to matter.
+
+
+
+However it'd probably would still not be guaranteed faster than evaluating
+below the sort, due to
+a) startup cost of the projection machinery
+b) potentially needing to deform during the expression's inputs during the
+   projection in the sort (or above)
+
+
+
+I don't know if there are realistic cases where b) matters?  You'd have to
+have nodes above the sort that would require the projection to happen at the
+sort (or an intermediary level) but then filter out most rows to avoid needing
+to deform anyway?  In all the realistic cases I can think of the expression
+evaluation should then be pulled up above that filtering out of rows?
+
+
+
+I don't know if a) is really ever significant enough to matter compared to the
+cost of sorting. It sure shows up in a sequential scan, but that has an order
+of magnitude or three lower per tuple cost.
+
+
+
+Are there cases where something like Chengpeng's logic would still trigger a
+result node being injected, if sort had projection capability?
+
+
+
+> So I think we need some sort of gating rule, whereby we only postpone
+> these expressions if (a) there was already a reason to add a
+> projection or (b) we can make some cost-based or at least heuristic
+> estimate that says we'll cut the sort data volume significantly.
+
+
+
+This reminds me: The heuristics around the cost of expression evaluation seem
+like they could be improved a fair bit by taking into account the cost of
+having to deform the input columns.  There's a huge difference between
+
+
+
+  func1(col1), func2(col1)
+and
+  func1(col1), func2(col2)
+and
+  func1(col30)
+
+
+
+Unless func* are particularly expensive, the cost will be increasingly
+dominated by tuple deforming.
+
+
+
+I think this is one thing that sometimes contributes to us wrongly choosing
+sequential scans with a qual over an index scans that needs to evaluate far
+fewer rows, because we just take the operator costs into account, not the
+tuple deforming it requires.
+
+
+
+Greetings,
+
+
+
+Andres Freund
+
+
