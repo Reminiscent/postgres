@@ -2940,8 +2940,75 @@ ALTER TABLE alter_table_partitions.att_explicit_check_1
 ALTER TABLE att_explicit_check
   ADD CONSTRAINT att_explicit_check_a_check CHECK (a > 0);
 
+CREATE TABLE att_generated_nn_set (a int) PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_generated_nn_set_1
+  PARTITION OF att_generated_nn_set FOR VALUES FROM (1) TO (10);
+ALTER TABLE alter_table_partitions.att_generated_nn_set_1
+  ADD CONSTRAINT att_generated_nn_set_a_not_null CHECK (a IS NOT NULL);
+ALTER TABLE att_generated_nn_set ALTER a SET NOT NULL;
+SELECT conrelid::regclass, conname, contype, conkey, conislocal, coninhcount
+  FROM pg_constraint
+ WHERE conrelid IN ('att_generated_nn_set'::regclass,
+                   'alter_table_partitions.att_generated_nn_set_1'::regclass)
+   AND contype IN ('c', 'n')
+ ORDER BY conrelid::regclass::text, conname;
+
+CREATE TABLE att_generated_nn_add (a int) PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_generated_nn_add_1
+  PARTITION OF att_generated_nn_add FOR VALUES FROM (1) TO (10);
+ALTER TABLE alter_table_partitions.att_generated_nn_add_1
+  ADD CONSTRAINT att_generated_nn_add_a_not_null CHECK (a IS NOT NULL);
+ALTER TABLE att_generated_nn_add ADD NOT NULL a;
+SELECT conrelid::regclass, conname, contype, conkey, conislocal, coninhcount
+  FROM pg_constraint
+ WHERE conrelid IN ('att_generated_nn_add'::regclass,
+                   'alter_table_partitions.att_generated_nn_add_1'::regclass)
+   AND contype IN ('c', 'n')
+ ORDER BY conrelid::regclass::text, conname;
+
+CREATE TABLE att_generated_nn_multi (a int) PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_generated_nn_multi_p
+  PARTITION OF att_generated_nn_multi FOR VALUES FROM (1) TO (100)
+  PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_generated_nn_multi_1
+  PARTITION OF alter_table_partitions.att_generated_nn_multi_p
+  FOR VALUES FROM (1) TO (10);
+ALTER TABLE alter_table_partitions.att_generated_nn_multi_1
+  ADD CONSTRAINT att_generated_nn_multi_a_not_null CHECK (a IS NOT NULL);
+ALTER TABLE att_generated_nn_multi ADD NOT NULL a;
+SELECT conrelid::regclass, conname, contype, conkey, conislocal, coninhcount
+  FROM pg_constraint
+ WHERE conrelid IN ('att_generated_nn_multi'::regclass,
+                   'alter_table_partitions.att_generated_nn_multi_p'::regclass,
+                   'alter_table_partitions.att_generated_nn_multi_1'::regclass)
+   AND contype IN ('c', 'n')
+ ORDER BY conrelid::regclass::text, conname;
+
+CREATE TABLE att_generated_nn_adopt (a int) PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_generated_nn_adopt_1
+  PARTITION OF att_generated_nn_adopt FOR VALUES FROM (1) TO (10);
+ALTER TABLE alter_table_partitions.att_generated_nn_adopt_1
+  ADD CONSTRAINT att_generated_nn_adopt_child_nn NOT NULL a;
+ALTER TABLE att_generated_nn_adopt ALTER a SET NOT NULL;
+SELECT conrelid::regclass, conname, contype, conkey, conislocal, coninhcount
+  FROM pg_constraint
+ WHERE conrelid IN ('att_generated_nn_adopt'::regclass,
+                   'alter_table_partitions.att_generated_nn_adopt_1'::regclass)
+   AND contype = 'n'
+ ORDER BY conrelid::regclass::text, conname;
+
+CREATE TABLE att_explicit_nn (a int) PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_explicit_nn_1
+  PARTITION OF att_explicit_nn FOR VALUES FROM (1) TO (10);
+ALTER TABLE alter_table_partitions.att_explicit_nn_1
+  ADD CONSTRAINT att_explicit_nn_a_not_null CHECK (a IS NOT NULL);
+ALTER TABLE att_explicit_nn
+  ADD CONSTRAINT att_explicit_nn_a_not_null NOT NULL a;
+
 DROP TABLE att_generated_check, att_generated_check_multi, att_explicit_check,
-           att_generated_check_merge;
+           att_generated_check_merge,
+           att_generated_nn_set, att_generated_nn_add,
+           att_generated_nn_multi, att_generated_nn_adopt, att_explicit_nn;
 DROP SCHEMA alter_table_partitions;
 
 -- cannot drop inherited NOT NULL or check constraints from partition

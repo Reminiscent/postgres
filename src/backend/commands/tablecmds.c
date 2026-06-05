@@ -550,6 +550,9 @@ static ObjectAddress ATExecSetNotNull(List **wqueue, Relation rel,
 									  char *conName, char *colName,
 									  bool recurse, bool recursing,
 									  LOCKMODE lockmode);
+static char *ChooseSetNotNullConstraintName(Relation rel, char *colName,
+											AttrNumber attnum,
+											LOCKMODE lockmode);
 static bool GeneratedConstraintNameConflicts(Relation rel, Constraint *constr,
 											 const char *conname, Node *expr,
 											 AttrNumber attnum, void *arg);
@@ -8023,8 +8026,39 @@ set_attnotnull(List **wqueue, Relation rel, AttrNumber attnum,
 }
 
 /*
- * Reject generated CHECK names that would fail while being propagated to child
- * tables.
+ * Choose an automatically-generated name for a recursive SET NOT NULL
+ * constraint.
+ */
+static char *
+ChooseSetNotNullConstraintName(Relation rel, char *colName, AttrNumber attnum,
+							   LOCKMODE lockmode)
+{
+	GeneratedConstraintNameContext context;
+	Constraint *constraint;
+	List	   *nnnames = NIL;
+	char	   *conName;
+
+	context.lockmode = lockmode;
+	constraint = makeNotNullConstraint(makeString(colName));
+
+	do
+	{
+		conName = ChooseConstraintName(RelationGetRelationName(rel),
+									   colName, "not_null",
+									   RelationGetNamespace(rel),
+									   nnnames);
+		if (!GeneratedConstraintNameConflicts(rel, constraint, conName,
+											  NULL, attnum, &context))
+			break;
+		nnnames = lappend(nnnames, conName);
+	} while (true);
+
+	return conName;
+}
+
+/*
+ * Reject generated CHECK and NOT NULL names that would fail while being
+ * propagated to child tables.
  */
 static bool
 GeneratedConstraintNameConflicts(Relation rel, Constraint *constr,
@@ -8038,9 +8072,6 @@ GeneratedConstraintNameConflicts(Relation rel, Constraint *constr,
 	children = find_inheritance_children(RelationGetRelid(rel),
 										 context->lockmode);
 
-	Assert(constr->contype == CONSTR_CHECK);
-	Assert(attnum == InvalidAttrNumber);
-
 	foreach_oid(childoid, children)
 	{
 		Relation	childrel;
@@ -8052,11 +8083,13 @@ GeneratedConstraintNameConflicts(Relation rel, Constraint *constr,
 									   RelationGetDescr(rel),
 									   false);
 
+		if (constr->contype == CONSTR_CHECK)
 		{
 			Node	   *child_expr;
 			bool		found_whole_row;
 			bool		found = false;
 
+			Assert(attnum == InvalidAttrNumber);
 			child_expr = map_variable_attnos(expr, 1, 0, attmap,
 											 RelationGetForm(childrel)->reltype,
 											 &found_whole_row);
@@ -8079,6 +8112,29 @@ GeneratedConstraintNameConflicts(Relation rel, Constraint *constr,
 																arg);
 			}
 		}
+		else if (constr->contype == CONSTR_NOTNULL)
+		{
+			AttrNumber	childattnum;
+			HeapTuple	tup;
+
+			Assert(attnum > 0);
+			childattnum = attmap->attnums[attnum - 1];
+			tup = findNotNullConstraintAttnum(RelationGetRelid(childrel),
+											  childattnum);
+			if (HeapTupleIsValid(tup))
+				heap_freetuple(tup);
+			else if (ConstraintNameIsUsed(CONSTRAINT_RELATION,
+										  RelationGetRelid(childrel),
+										  conname))
+				conflict = true;
+			else
+				conflict = GeneratedConstraintNameConflicts(childrel, constr,
+															conname, NULL,
+															childattnum, arg);
+		}
+		else
+			elog(ERROR, "unexpected constraint type: %d",
+				 (int) constr->contype);
 
 		free_attrmap(attmap);
 		table_close(childrel, NoLock);
@@ -8225,10 +8281,14 @@ ATExecSetNotNull(List **wqueue, Relation rel, char *conName, char *colName,
 	if (!recursing)
 	{
 		Assert(conName == NULL);
-		conName = ChooseConstraintName(RelationGetRelationName(rel),
-									   colName, "not_null",
-									   RelationGetNamespace(rel),
-									   NIL);
+		if (recurse)
+			conName = ChooseSetNotNullConstraintName(rel, colName, attnum,
+													 lockmode);
+		else
+			conName = ChooseConstraintName(RelationGetRelationName(rel),
+										   colName, "not_null",
+										   RelationGetNamespace(rel),
+										   NIL);
 	}
 
 	constraint = makeNotNullConstraint(makeString(colName));
@@ -10080,12 +10140,14 @@ ChooseForeignKeyConstraintNameAddition(List *colnames)
  * Subroutine for ATExecAddConstraint.
  *
  * We must recurse to child tables during execution, rather than using
- * ALTER TABLE's normal prep-time recursion.  The reason is that all the
- * constraints *must* be given the same name, else they won't be seen as
- * related later.  If the user didn't explicitly specify a name, then
- * AddRelationNewConstraints would normally assign different names to the
- * child constraints.  To fix that, we must capture the name assigned at
- * the parent table and pass that down.
+ * ALTER TABLE's normal prep-time recursion.  For CHECK constraints, the
+ * constraints must be given the same name, else they won't be seen as related
+ * later.  For NOT NULL constraints, matching inherited constraints is based on
+ * the constrained column, but new child constraints still use the parent
+ * constraint's name.  If the user didn't explicitly specify a name, then
+ * AddRelationNewConstraints would normally assign different names to the child
+ * constraints.  To fix that, we must capture the name assigned at the parent
+ * table and pass that down.
  */
 static ObjectAddress
 ATAddCheckNNConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
@@ -10116,8 +10178,7 @@ ATAddCheckNNConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	 * to do any validation work.  That can only happen at child tables,
 	 * though, since we disallow merging at the top level.
 	 */
-	if (constr->contype == CONSTR_CHECK &&
-		!recursing && constr->conname == NULL && recurse &&
+	if (!recursing && constr->conname == NULL && recurse &&
 		!constr->is_no_inherit)
 	{
 		GeneratedConstraintNameContext context;
