@@ -169,6 +169,11 @@ typedef enum AlterTablePass
 
 #define AT_NUM_PASSES			(AT_PASS_MISC + 1)
 
+typedef struct GeneratedConstraintNameContext
+{
+	LOCKMODE	lockmode;
+}			GeneratedConstraintNameContext;
+
 typedef struct AlteredTableInfo
 {
 	/* Information saved before any work commences: */
@@ -545,6 +550,9 @@ static ObjectAddress ATExecSetNotNull(List **wqueue, Relation rel,
 									  char *conName, char *colName,
 									  bool recurse, bool recursing,
 									  LOCKMODE lockmode);
+static bool GeneratedConstraintNameConflicts(Relation rel, Constraint *constr,
+											 const char *conname, Node *expr,
+											 AttrNumber attnum, void *arg);
 static bool NotNullImpliedByRelConstraints(Relation rel, Form_pg_attribute attr);
 static bool ConstraintImpliedByRelConstraint(Relation scanrel,
 											 List *testConstraint, List *provenConstraint);
@@ -8015,6 +8023,74 @@ set_attnotnull(List **wqueue, Relation rel, AttrNumber attnum,
 }
 
 /*
+ * Reject generated CHECK names that would fail while being propagated to child
+ * tables.
+ */
+static bool
+GeneratedConstraintNameConflicts(Relation rel, Constraint *constr,
+								 const char *conname, Node *expr,
+								 AttrNumber attnum, void *arg)
+{
+	GeneratedConstraintNameContext *context;
+	List	   *children;
+
+	context = (GeneratedConstraintNameContext *) arg;
+	children = find_inheritance_children(RelationGetRelid(rel),
+										 context->lockmode);
+
+	Assert(constr->contype == CONSTR_CHECK);
+	Assert(attnum == InvalidAttrNumber);
+
+	foreach_oid(childoid, children)
+	{
+		Relation	childrel;
+		AttrMap    *attmap;
+		bool		conflict = false;
+
+		childrel = table_open(childoid, NoLock);
+		attmap = build_attrmap_by_name(RelationGetDescr(childrel),
+									   RelationGetDescr(rel),
+									   false);
+
+		{
+			Node	   *child_expr;
+			bool		found_whole_row;
+			bool		found = false;
+
+			child_expr = map_variable_attnos(expr, 1, 0, attmap,
+											 RelationGetForm(childrel)->reltype,
+											 &found_whole_row);
+			/* Since we provided a to_rowtype, we may ignore found_whole_row. */
+
+			if (!CheckConstraintMergesWithExisting(childrel, conname,
+												   child_expr,
+												   true, false,
+												   constr->is_enforced,
+												   constr->initially_valid,
+												   constr->is_no_inherit,
+												   &found))
+			{
+				if (found)
+					conflict = true;
+				else
+					conflict = GeneratedConstraintNameConflicts(childrel, constr,
+																conname, child_expr,
+																InvalidAttrNumber,
+																arg);
+			}
+		}
+
+		free_attrmap(attmap);
+		table_close(childrel, NoLock);
+
+		if (conflict)
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * ALTER TABLE ALTER COLUMN SET NOT NULL
  *
  * Add a not-null constraint to a single table and its children.  Returns
@@ -10040,13 +10116,31 @@ ATAddCheckNNConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	 * to do any validation work.  That can only happen at child tables,
 	 * though, since we disallow merging at the top level.
 	 */
-	newcons = AddRelationNewConstraints(rel, NIL,
-										list_make1(copyObject(constr)),
-										recursing || is_readd,	/* allow_merge */
-										!recursing, /* is_local */
-										is_readd,	/* is_internal */
-										NULL);	/* queryString not available
-												 * here */
+	if (constr->contype == CONSTR_CHECK &&
+		!recursing && constr->conname == NULL && recurse &&
+		!constr->is_no_inherit)
+	{
+		GeneratedConstraintNameContext context;
+
+		context.lockmode = lockmode;
+		newcons = AddRelationNewConstraintsWithNameCheck(rel, NIL,
+														 list_make1(copyObject(constr)),
+														 recursing || is_readd, /* allow_merge */
+														 !recursing,	/* is_local */
+														 is_readd,	/* is_internal */
+														 NULL,	/* queryString not
+																 * available here */
+														 GeneratedConstraintNameConflicts,
+														 &context);
+	}
+	else
+		newcons = AddRelationNewConstraints(rel, NIL,
+											list_make1(copyObject(constr)),
+											recursing || is_readd,	/* allow_merge */
+											!recursing, /* is_local */
+											is_readd,	/* is_internal */
+											NULL);	/* queryString not
+													 * available here */
 
 	/* we don't expect more than one constraint here */
 	Assert(list_length(newcons) <= 1);

@@ -2882,6 +2882,68 @@ ALTER TABLE ONLY parted_no_parts ALTER a SET NOT NULL;
 ALTER TABLE ONLY parted_no_parts ADD CONSTRAINT check_a CHECK (a > 0);
 DROP TABLE parted_no_parts;
 
+-- generated constraint names must be usable throughout the partition tree
+CREATE SCHEMA alter_table_partitions;
+
+CREATE TABLE att_generated_check (a int) PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_generated_check_1
+  PARTITION OF att_generated_check FOR VALUES FROM (1) TO (10);
+ALTER TABLE alter_table_partitions.att_generated_check_1
+  ADD CONSTRAINT att_generated_check_a_check CHECK (a > 100);
+ALTER TABLE att_generated_check ADD CHECK (a > 0);
+SELECT conrelid::regclass, conname, contype, pg_get_constraintdef(oid),
+       conislocal, coninhcount
+  FROM pg_constraint
+ WHERE conrelid IN ('att_generated_check'::regclass,
+                   'alter_table_partitions.att_generated_check_1'::regclass)
+   AND contype = 'c'
+ ORDER BY conrelid::regclass::text, conname;
+
+CREATE TABLE att_generated_check_multi (a int) PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_generated_check_multi_p
+  PARTITION OF att_generated_check_multi FOR VALUES FROM (1) TO (100)
+  PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_generated_check_multi_1
+  PARTITION OF alter_table_partitions.att_generated_check_multi_p
+  FOR VALUES FROM (1) TO (10);
+ALTER TABLE alter_table_partitions.att_generated_check_multi_1
+  ADD CONSTRAINT att_generated_check_multi_a_check CHECK (a > 100);
+ALTER TABLE att_generated_check_multi ADD CHECK (a > 0);
+SELECT conrelid::regclass, conname, contype, pg_get_constraintdef(oid),
+       conislocal, coninhcount
+  FROM pg_constraint
+ WHERE conrelid IN ('att_generated_check_multi'::regclass,
+                   'alter_table_partitions.att_generated_check_multi_p'::regclass,
+                   'alter_table_partitions.att_generated_check_multi_1'::regclass)
+   AND contype = 'c'
+ ORDER BY conrelid::regclass::text, conname;
+
+CREATE TABLE att_generated_check_merge (a int) PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_generated_check_merge_1
+  PARTITION OF att_generated_check_merge FOR VALUES FROM (1) TO (10);
+ALTER TABLE alter_table_partitions.att_generated_check_merge_1
+  ADD CONSTRAINT att_generated_check_merge_a_check CHECK (a > 0);
+ALTER TABLE att_generated_check_merge ADD CHECK (a > 0);
+SELECT conrelid::regclass, conname, contype, pg_get_constraintdef(oid),
+       conislocal, coninhcount
+  FROM pg_constraint
+ WHERE conrelid IN ('att_generated_check_merge'::regclass,
+                   'alter_table_partitions.att_generated_check_merge_1'::regclass)
+   AND contype = 'c'
+ ORDER BY conrelid::regclass::text, conname;
+
+CREATE TABLE att_explicit_check (a int) PARTITION BY RANGE (a);
+CREATE TABLE alter_table_partitions.att_explicit_check_1
+  PARTITION OF att_explicit_check FOR VALUES FROM (1) TO (10);
+ALTER TABLE alter_table_partitions.att_explicit_check_1
+  ADD CONSTRAINT att_explicit_check_a_check CHECK (a > 100);
+ALTER TABLE att_explicit_check
+  ADD CONSTRAINT att_explicit_check_a_check CHECK (a > 0);
+
+DROP TABLE att_generated_check, att_generated_check_multi, att_explicit_check,
+           att_generated_check_merge;
+DROP SCHEMA alter_table_partitions;
+
 -- cannot drop inherited NOT NULL or check constraints from partition
 ALTER TABLE list_parted2 ALTER b SET NOT NULL, ADD CONSTRAINT check_a2 CHECK (a > 0);
 ALTER TABLE part_2 ALTER b DROP NOT NULL;

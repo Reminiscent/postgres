@@ -107,6 +107,14 @@ static Oid	StoreRelCheck(Relation rel, const char *ccname, Node *expr,
 						  int16 inhcount, bool is_no_inherit, bool is_internal);
 static void StoreConstraints(Relation rel, List *cooked_constraints,
 							 bool is_internal);
+static bool CheckConstraintMergesWithExistingTuple(Relation rel, HeapTuple tup,
+												   TupleDesc tupdesc,
+												   const char *ccname, Node *expr,
+												   bool allow_merge, bool is_local,
+												   bool is_enforced,
+												   bool is_initially_valid,
+												   bool is_no_inherit,
+												   bool error_on_failure);
 static bool MergeWithExistingConstraint(Relation rel, const char *ccname, Node *expr,
 										bool allow_merge, bool is_local,
 										bool is_enforced,
@@ -2787,6 +2795,178 @@ AddRelationNewConstraintsInternal(Relation rel,
 }
 
 /*
+ * Test whether an existing same-name constraint tuple can be merged with the
+ * proposed CHECK constraint.  If error_on_failure is true, report the same
+ * errors as MergeWithExistingConstraint(); otherwise, just return false.
+ */
+static bool
+CheckConstraintMergesWithExistingTuple(Relation rel, HeapTuple tup,
+									   TupleDesc tupdesc,
+									   const char *ccname, Node *expr,
+									   bool allow_merge, bool is_local,
+									   bool is_enforced,
+									   bool is_initially_valid,
+									   bool is_no_inherit,
+									   bool error_on_failure)
+{
+	Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tup);
+	bool		found = false;
+
+	/* Conflicts if not identical check constraint */
+	if (con->contype == CONSTRAINT_CHECK)
+	{
+		Datum		val;
+		bool		isnull;
+
+		val = fastgetattr(tup,
+						  Anum_pg_constraint_conbin,
+						  tupdesc, &isnull);
+		if (isnull)
+			elog(ERROR, "null conbin for rel %s",
+				 RelationGetRelationName(rel));
+		if (equal(expr, stringToNode(TextDatumGetCString(val))))
+			found = true;
+	}
+
+	/*
+	 * If the existing constraint is purely inherited (no local definition)
+	 * then interpret addition of a local constraint as a legal merge.  This
+	 * allows ALTER ADD CONSTRAINT on parent and child tables to be given in
+	 * either order with same end state.  However if the relation is a
+	 * partition, all inherited constraints are always non-local, including
+	 * those that were merged.
+	 */
+	if (is_local && !con->conislocal && !rel->rd_rel->relispartition)
+		allow_merge = true;
+
+	if (!found || !allow_merge)
+	{
+		if (error_on_failure)
+			ereport(ERROR,
+					(errcode(ERRCODE_DUPLICATE_OBJECT),
+					 errmsg("constraint \"%s\" for relation \"%s\" already exists",
+							ccname, RelationGetRelationName(rel))));
+		return false;
+	}
+
+	/* If the child constraint is "no inherit" then cannot merge */
+	if (con->connoinherit)
+	{
+		if (error_on_failure)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("constraint \"%s\" conflicts with non-inherited constraint on relation \"%s\"",
+							ccname, RelationGetRelationName(rel))));
+		return false;
+	}
+
+	/*
+	 * Must not change an existing inherited constraint to "no inherit"
+	 * status. That's because inherited constraints should be able to
+	 * propagate to lower-level children.
+	 */
+	if (con->coninhcount > 0 && is_no_inherit)
+	{
+		if (error_on_failure)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("constraint \"%s\" conflicts with inherited constraint on relation \"%s\"",
+							ccname, RelationGetRelationName(rel))));
+		return false;
+	}
+
+	/*
+	 * If the child constraint is "not valid" then cannot merge with a valid
+	 * parent constraint.
+	 */
+	if (is_initially_valid && con->conenforced && !con->convalidated)
+	{
+		if (error_on_failure)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("constraint \"%s\" conflicts with NOT VALID constraint on relation \"%s\"",
+							ccname, RelationGetRelationName(rel))));
+		return false;
+	}
+
+	/*
+	 * A non-enforced child constraint cannot be merged with an enforced
+	 * parent constraint. However, the reverse is allowed, where the child
+	 * constraint is enforced.
+	 */
+	if ((!is_local && is_enforced && !con->conenforced) ||
+		(is_local && !is_enforced && con->conenforced))
+	{
+		if (error_on_failure)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+					 errmsg("constraint \"%s\" conflicts with NOT ENFORCED constraint on relation \"%s\"",
+							ccname, RelationGetRelationName(rel))));
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * Test whether a same-name CHECK constraint exists and would merge with the
+ * proposed CHECK constraint.  This is useful for callers that need to know
+ * whether an automatically-generated name would be safe before choosing it.
+ */
+bool
+CheckConstraintMergesWithExisting(Relation rel, const char *ccname, Node *expr,
+								  bool allow_merge, bool is_local,
+								  bool is_enforced,
+								  bool is_initially_valid,
+								  bool is_no_inherit,
+								  bool *found)
+{
+	Relation	conDesc;
+	SysScanDesc conscan;
+	ScanKeyData skey[3];
+	HeapTuple	tup;
+	bool		mergeable = false;
+
+	/* Search for a pg_constraint entry with same name and relation */
+	conDesc = table_open(ConstraintRelationId, AccessShareLock);
+
+	*found = false;
+
+	ScanKeyInit(&skey[0],
+				Anum_pg_constraint_conrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationGetRelid(rel)));
+	ScanKeyInit(&skey[1],
+				Anum_pg_constraint_contypid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(InvalidOid));
+	ScanKeyInit(&skey[2],
+				Anum_pg_constraint_conname,
+				BTEqualStrategyNumber, F_NAMEEQ,
+				CStringGetDatum(ccname));
+
+	conscan = systable_beginscan(conDesc, ConstraintRelidTypidNameIndexId, true,
+								 NULL, 3, skey);
+
+	/* There can be at most one matching row */
+	if (HeapTupleIsValid(tup = systable_getnext(conscan)))
+	{
+		*found = true;
+		mergeable =
+			CheckConstraintMergesWithExistingTuple(rel, tup, conDesc->rd_att,
+												   ccname, expr, allow_merge,
+												   is_local, is_enforced,
+												   is_initially_valid,
+												   is_no_inherit, false);
+	}
+
+	systable_endscan(conscan);
+	table_close(conDesc, AccessShareLock);
+
+	return mergeable;
+}
+
+/*
  * Check for a pre-existing check constraint that conflicts with a proposed
  * new one, and either adjust its conislocal/coninhcount settings or throw
  * error as needed.
@@ -2833,80 +3013,15 @@ MergeWithExistingConstraint(Relation rel, const char *ccname, Node *expr,
 	/* There can be at most one matching row */
 	if (HeapTupleIsValid(tup = systable_getnext(conscan)))
 	{
-		Form_pg_constraint con = (Form_pg_constraint) GETSTRUCT(tup);
+		Form_pg_constraint con;
 
-		/* Found it.  Conflicts if not identical check constraint */
-		if (con->contype == CONSTRAINT_CHECK)
-		{
-			Datum		val;
-			bool		isnull;
-
-			val = fastgetattr(tup,
-							  Anum_pg_constraint_conbin,
-							  conDesc->rd_att, &isnull);
-			if (isnull)
-				elog(ERROR, "null conbin for rel %s",
-					 RelationGetRelationName(rel));
-			if (equal(expr, stringToNode(TextDatumGetCString(val))))
-				found = true;
-		}
-
-		/*
-		 * If the existing constraint is purely inherited (no local
-		 * definition) then interpret addition of a local constraint as a
-		 * legal merge.  This allows ALTER ADD CONSTRAINT on parent and child
-		 * tables to be given in either order with same end state.  However if
-		 * the relation is a partition, all inherited constraints are always
-		 * non-local, including those that were merged.
-		 */
-		if (is_local && !con->conislocal && !rel->rd_rel->relispartition)
-			allow_merge = true;
-
-		if (!found || !allow_merge)
-			ereport(ERROR,
-					(errcode(ERRCODE_DUPLICATE_OBJECT),
-					 errmsg("constraint \"%s\" for relation \"%s\" already exists",
-							ccname, RelationGetRelationName(rel))));
-
-		/* If the child constraint is "no inherit" then cannot merge */
-		if (con->connoinherit)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("constraint \"%s\" conflicts with non-inherited constraint on relation \"%s\"",
-							ccname, RelationGetRelationName(rel))));
-
-		/*
-		 * Must not change an existing inherited constraint to "no inherit"
-		 * status.  That's because inherited constraints should be able to
-		 * propagate to lower-level children.
-		 */
-		if (con->coninhcount > 0 && is_no_inherit)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("constraint \"%s\" conflicts with inherited constraint on relation \"%s\"",
-							ccname, RelationGetRelationName(rel))));
-
-		/*
-		 * If the child constraint is "not valid" then cannot merge with a
-		 * valid parent constraint.
-		 */
-		if (is_initially_valid && con->conenforced && !con->convalidated)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("constraint \"%s\" conflicts with NOT VALID constraint on relation \"%s\"",
-							ccname, RelationGetRelationName(rel))));
-
-		/*
-		 * A non-enforced child constraint cannot be merged with an enforced
-		 * parent constraint. However, the reverse is allowed, where the child
-		 * constraint is enforced.
-		 */
-		if ((!is_local && is_enforced && !con->conenforced) ||
-			(is_local && !is_enforced && con->conenforced))
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-					 errmsg("constraint \"%s\" conflicts with NOT ENFORCED constraint on relation \"%s\"",
-							ccname, RelationGetRelationName(rel))));
+		found = true;
+		if (!CheckConstraintMergesWithExistingTuple(rel, tup, conDesc->rd_att,
+													ccname, expr, allow_merge,
+													is_local, is_enforced,
+													is_initially_valid,
+													is_no_inherit, true))
+			elog(ERROR, "could not merge constraint \"%s\"", ccname);
 
 		/* OK to update the tuple */
 		ereport(NOTICE,
