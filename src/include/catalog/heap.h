@@ -48,6 +48,23 @@ typedef struct CookedConstraint
 								 * inherited */
 } CookedConstraint;
 
+/*
+ * Callback for AddRelationNewConstraintsWithNameCheck().  It is called only
+ * for automatically generated CHECK and NOT NULL constraint names, after a
+ * candidate name has been chosen but before any catalog changes are made.
+ * Return true to reject the candidate name and make the caller try another.
+ *
+ * This is meant for conflicts that can be fixed by choosing a different
+ * generated name; it must not replace the normal constraint validation and
+ * merge checks.
+ */
+typedef bool (*GeneratedConstraintNameConflictChecker) (Relation rel,
+														Constraint *constr,
+														const char *conname,
+														Node *expr,
+														AttrNumber attnum,
+														void *arg);
+
 extern Relation heap_create(const char *relname,
 							Oid relnamespace,
 							Oid reltablespace,
@@ -115,6 +132,15 @@ extern List *AddRelationNewConstraints(Relation rel,
 									   bool is_local,
 									   bool is_internal,
 									   const char *queryString);
+extern List *AddRelationNewConstraintsWithNameCheck(Relation rel,
+													List *newColDefaults,
+													List *newConstraints,
+													bool allow_merge,
+													bool is_local,
+													bool is_internal,
+													const char *queryString,
+													GeneratedConstraintNameConflictChecker nameConflictChecker,
+													void *nameConflictArg);
 extern List *AddRelationNotNullConstraints(Relation rel,
 										   List *constraints,
 										   List *old_notnulls,

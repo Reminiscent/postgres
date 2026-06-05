@@ -112,6 +112,15 @@ static bool MergeWithExistingConstraint(Relation rel, const char *ccname, Node *
 										bool is_enforced,
 										bool is_initially_valid,
 										bool is_no_inherit);
+static List *AddRelationNewConstraintsInternal(Relation rel,
+											   List *newColDefaults,
+											   List *newConstraints,
+											   bool allow_merge,
+											   bool is_local,
+											   bool is_internal,
+											   const char *queryString,
+											   GeneratedConstraintNameConflictChecker nameConflictChecker,
+											   void *nameConflictArg);
 static void SetRelationNumChecks(Relation rel, int numchecks);
 static Node *cookConstraint(ParseState *pstate,
 							Node *raw_constraint,
@@ -2410,6 +2419,46 @@ AddRelationNewConstraints(Relation rel,
 						  bool is_internal,
 						  const char *queryString)
 {
+	return AddRelationNewConstraintsInternal(rel, newColDefaults, newConstraints,
+											 allow_merge, is_local, is_internal,
+											 queryString, NULL, NULL);
+}
+
+/*
+ * AddRelationNewConstraintsWithNameCheck
+ *
+ * Like AddRelationNewConstraints, but calls nameConflictChecker for each
+ * automatically-generated constraint name.  If the callback returns true,
+ * the name is rejected and another generated name is tried.
+ */
+List *
+AddRelationNewConstraintsWithNameCheck(Relation rel,
+									   List *newColDefaults,
+									   List *newConstraints,
+									   bool allow_merge,
+									   bool is_local,
+									   bool is_internal,
+									   const char *queryString,
+									   GeneratedConstraintNameConflictChecker nameConflictChecker,
+									   void *nameConflictArg)
+{
+	return AddRelationNewConstraintsInternal(rel, newColDefaults, newConstraints,
+											 allow_merge, is_local, is_internal,
+											 queryString, nameConflictChecker,
+											 nameConflictArg);
+}
+
+static List *
+AddRelationNewConstraintsInternal(Relation rel,
+								  List *newColDefaults,
+								  List *newConstraints,
+								  bool allow_merge,
+								  bool is_local,
+								  bool is_internal,
+								  const char *queryString,
+								  GeneratedConstraintNameConflictChecker nameConflictChecker,
+								  void *nameConflictArg)
+{
 	List	   *cookedConstraints = NIL;
 	TupleDesc	tupleDesc;
 	TupleConstr *oldconstr;
@@ -2592,11 +2641,20 @@ AddRelationNewConstraints(Relation rel,
 				else
 					colname = NULL;
 
-				ccname = ChooseConstraintName(RelationGetRelationName(rel),
-											  colname,
-											  "check",
-											  RelationGetNamespace(rel),
-											  checknames);
+				do
+				{
+					ccname = ChooseConstraintName(RelationGetRelationName(rel),
+												  colname,
+												  "check",
+												  RelationGetNamespace(rel),
+												  checknames);
+					if (nameConflictChecker == NULL ||
+						!nameConflictChecker(rel, cdef, ccname,
+											 expr, InvalidAttrNumber,
+											 nameConflictArg))
+						break;
+					checknames = lappend(checknames, ccname);
+				} while (true);
 
 				/* save name for future checks */
 				checknames = lappend(checknames, ccname);
@@ -2676,11 +2734,21 @@ AddRelationNewConstraints(Relation rel,
 				nnname = cdef->conname;
 			}
 			else
-				nnname = ChooseConstraintName(RelationGetRelationName(rel),
-											  strVal(linitial(cdef->keys)),
-											  "not_null",
-											  RelationGetNamespace(rel),
-											  nnnames);
+			{
+				do
+				{
+					nnname = ChooseConstraintName(RelationGetRelationName(rel),
+												  strVal(linitial(cdef->keys)),
+												  "not_null",
+												  RelationGetNamespace(rel),
+												  nnnames);
+					if (nameConflictChecker == NULL ||
+						!nameConflictChecker(rel, cdef, nnname,
+											 NULL, colnum, nameConflictArg))
+						break;
+					nnnames = lappend(nnnames, nnname);
+				} while (true);
+			}
 			nnnames = lappend(nnnames, nnname);
 
 			constrOid =
