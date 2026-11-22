@@ -1,0 +1,190 @@
+[
+ {
+  "id": "R1-07",
+  "type": "RISK",
+  "subsystem": 12,
+  "family": "I3",
+  "question": "A change in PostgreSQL 13 made the heavyweight lock used when extending a relation conflict even among members of the same parallel lock group (a leader and its parallel workers), because two related processes extending the same relation at once is no safer than two unrelated ones. Previously, members of a lock group never blocked each other. The motivation was to open the door to parallel INSERT and COPY style operations.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_points": [
+   {
+    "point": "The blocking-pids reporting function assumes members of the same lock group never block each other, which stopped being true for relation extension locks.",
+    "quote": "pg_blocking_pids() assumes that members of the same lock group"
+   },
+   {
+    "point": "The function must now report lock group members as blockers for relation extension locks, so its result may include the blocked session's own PID since workers are reported by their leader's PID.",
+    "quote": "Since parallel workers are reported with their leader's PID, the\nresult may now include the blocked session's own PID."
+   }
+  ],
+  "key_files": [
+   "src/backend/utils/adt/lockfuncs.c"
+  ],
+  "commit": "e7ef2cf256cc"
+ },
+ {
+  "id": "R1-09",
+  "type": "RISK",
+  "subsystem": 12,
+  "family": "I7",
+  "question": "A change to the cumulative statistics system let a variable-numbered stats kind, typically a custom kind from an extension, keep its entries in its own dedicated shared hash table with its own memory area, rather than the one shared table used by all kinds. At server startup and attach time, each registered kind is mapped to either the shared table or its dedicated one. Fixed-size kinds cannot use the option and have neither a hash table nor a memory area.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_points": [
+   {
+    "point": "Reading the stats file at startup never checked that the kind of a hash-style entry is variable-sized.",
+    "quote": "has never checked that the kind of a hash entry"
+   },
+   {
+    "point": "If a kind ID is reused across restarts with different preloaded libraries, an entry written for a hashed kind can be read back against a fixed-size kind, whose hash and memory-area references are NULL, causing a NULL pointer dereference.",
+    "quote": "Fixed-sized stats\nkinds have no hash table and no DSA area, hence their dsa references in\npgStatLocal.kind_hash[] are NULL."
+   }
+  ],
+  "key_files": [
+   "src/backend/utils/activity/pgstat.c"
+  ],
+  "commit": "0d110901f0ef"
+ },
+ {
+  "id": "R2-03",
+  "type": "RISK",
+  "subsystem": 3,
+  "family": "none",
+  "question": "A new SQL extension was added: UPDATE and DELETE can take a FOR PORTION OF clause on a range or multirange column to perform a temporal update or delete. If a row's time range partly falls outside the targeted bounds, the command truncates the row and inserts one or more new rows (temporal leftovers) holding the untouched parts. The feature was implemented with new grammar, new executor logic to insert the leftovers, documentation and tests. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_points": [
+   {
+    "point": "Using FOR PORTION OF against a view that has INSTEAD OF triggers crashed, because the feature's executor/leftover logic did not account for that combination.",
+    "quote": "Previously, an attempt to use these features together caused a crash."
+   },
+   {
+    "point": "The fix is to reject the combination, and the check belongs in the rewriter (where view handling happens), not in the parser.",
+    "quote": "Tests are added also to show that the check for this should be in the\nrewriter, not the parser, as an earlier patch version suggested."
+   }
+  ],
+  "key_files": [
+   "src/backend/rewrite/rewriteHandler.c"
+  ],
+  "commit": "dfce19c2300"
+ },
+ {
+  "id": "R3-02",
+  "type": "RISK",
+  "subsystem": 6,
+  "family": "I2",
+  "question": "A GIN fix made pending-list cleanup safe against concurrent cleaners: previously a cleanup that saw another process cleaning could exit early, and VACUUM could then miss tuples that it needed to delete. The fix serialized cleanup of the pending list with a lock and made VACUUM wait for it, and also let automatic maintenance stop at the tail of the list as of the start of cleanup rather than chase concurrent inserts. The cleanup is required because tuples recently inserted into the pending list can contain row pointers that VACUUM already considers dead. (a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. (b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_points": [
+   {
+    "point": "The bulk-delete routine does pending-list cleanup only on its first call, not on later calls.",
+    "quote": "However, ginbulkdelete neglected to perform pending list cleanup on\nVACUUM's second or subsequent call."
+   },
+   {
+    "point": "A VACUUM needing multiple rounds of index vacuuming can leave dangling TID references to dead heap tuples in the index, violating the requirement that index vacuuming remove all dead TIDs.",
+    "quote": "It was therefore possible for a\nVACUUM that requires multiple rounds of index vacuuming to leave behind\ndangling references."
+   },
+   {
+    "point": "Fix performs pending list cleanup on every bulk-delete call, and comments clarify why not fully emptying the list is safe.",
+    "quote": "To fix, teach ginbulkdelete to perform pending list cleanup during every\ncall."
+   }
+  ],
+  "key_files": [
+   "src/backend/access/gin/ginfast.c",
+   "src/backend/access/gin/ginvacuum.c",
+   "src/include/access/gin_private.h"
+  ],
+  "commit": "8637383f5ff"
+ },
+ {
+  "id": "R3-03",
+  "type": "RISK",
+  "subsystem": 6,
+  "family": "I5",
+  "question": "A recent feature let autovacuum workers use parallel workers for index vacuuming and cleanup, controlled by a new GUC and a per-table storage parameter. To handle a SIGHUP changing cost-based delay settings mid-operation, the leader stores its effective cost parameters in dynamic shared memory, and parallel workers poll for updates. Setup of this sharing happens when the parallel context is created and registers a cleanup callback to run when the shared memory segment is detached. (a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. (b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_points": [
+   {
+    "point": "When no DSM segment can be created, the parallel context exists with zero workers and a NULL segment pointer; the original code registered a detach callback on that NULL pointer.",
+    "quote": "If no DSM segment can be created, a ParallelContext can still be\ncreated with zero workers, but its seg pointer is NULL. Parallel\nautovacuum registered a segment detach callback on that NULL pointer,"
+   },
+   {
+    "point": "The result is a crash of the autovacuum worker, a robustness failure when resources (shared memory) are exhausted.",
+    "quote": "crashing the autovacuum worker."
+   },
+   {
+    "point": "Fix sets up the shared cost parameters and the callback only when the context has workers, since there is nothing to propagate to otherwise.",
+    "quote": "Fix by setting up the shared cost parameters and the detach callback\nonly when the parallel context has workers, as there are no workers to\npropagate the parameters to otherwise."
+   }
+  ],
+  "key_files": [
+   "src/backend/commands/vacuumparallel.c"
+  ],
+  "commit": "cc053b6e127"
+ },
+ {
+  "id": "R3-04",
+  "type": "RISK",
+  "subsystem": 7,
+  "family": "I2",
+  "question": "PostgreSQL once changed snapshot export and import so that the exporting session no longer needs an assigned transaction id: the export file records the virtual transaction id, which avoids serializing logical-slot creation and also makes it possible to export snapshots on hot-standby replicas. On a standby, a snapshot lists in-progress transactions differently from a primary: all running top-level and sub transaction ids are stored in the sub-transaction array, with the top-level array left empty, and the overflow flag does not mean what it means elsewhere. (a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. (b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_points": [
+   {
+    "point": "Export treated the sub-transaction array as redundant whenever the overflow flag was set, even for recovery snapshots where it holds all running XIDs.",
+    "quote": "Unlike\nwith other snapshots, its suboverflowed flag does not mean that subxip\nis redundant.  We nevertheless treated it that way during snapshot"
+   },
+   {
+    "point": "An importing session could see in-progress transactions as aborted, and hint bits could be wrongly set on the standby, so tuples appear wrongly visible/invisible even to other sessions.",
+    "quote": "so an importing session could see in-progress transactions as\naborted.  This misbehavior could also lead to hint bits being\nincorrectly set on the standby;"
+   },
+   {
+    "point": "Fix exports the sub-transaction array regardless of overflow for snapshots taken during recovery, matching the existing copy and serialize paths.",
+    "quote": "To fix, teach snapshot export to include the subxip[] array regardless\nof the overflow flag when the snapshot is taken during recovery."
+   }
+  ],
+  "key_files": [
+   "src/backend/utils/time/snapmgr.c"
+  ],
+  "commit": "79b101486c1"
+ },
+ {
+  "id": "R4-01",
+  "type": "RISK",
+  "subsystem": 9,
+  "family": "I5",
+  "question": "A recent change converted all remaining built-in subsystems to a new shared-memory allocation API. Its stated goal was to remove every remaining direct use of the older routines that create or attach to named shared structures and shared hash tables in built-in code. After this conversion, subsystems set up their shared state through registered callbacks instead. Consider a build where each server child process is started by re-executing the server binary (the EXEC_BACKEND model, as on Windows) and the debugging GUC wal_debug is turned on.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_points": [
+   {
+    "point": "A memory context used only for wal_debug tracing was created in an initialization callback that now runs only in the postmaster or a standalone backend.",
+    "quote": "Converting xlog.c to the new shared memory allocation API left the\ncreation of the memory context used by wal_debug in the\nXLOGShmemInit() callback, which now only runs in the postmaster or in"
+   },
+   {
+    "point": "In EXEC_BACKEND children the context pointer stayed uninitialized, so the first WAL insertion with wal_debug crashed the backend.",
+    "quote": "As a result, walDebugCtx was left uninitialized in child processes in\nEXEC_BACKEND mode, and with wal_debug turned on, the backend crashed\non first WAL insertion."
+   }
+  ],
+  "key_files": [
+   "src/backend/access/transam/xlog.c",
+   "src/backend/access/transam/xloginsert.c",
+   "src/include/access/xlog.h"
+  ],
+  "commit": "6873a138f78"
+ },
+ {
+  "id": "R4-05",
+  "type": "RISK",
+  "subsystem": 10,
+  "family": "I6",
+  "question": "A change allowed the two_phase option of a subscription to be altered. Because the option is controlled by both the publisher (as a slot option) and the subscriber, the slot option must also be modified. Turning it from true to false is permitted only when there are no pending prepared transactions for the subscription, since otherwise their changes could be replicated again along with the commit, giving duplicate data or errors. Turning it from false to true is allowed only after initial data synchronization is complete, so it is performed later by the logical replication worker.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_points": [
+   {
+    "point": "ALTER SUBSCRIPTION SET (two_phase = true) always moved the state to pending even when it was already enabled, though the publisher slot still had two_phase on and prepared transactions could exist.",
+    "quote": "ALTER SUBSCRIPTION ... SET (two_phase = true) always moved the\nsubscription's two_phase state to pending, even if two_phase was already\nenabled."
+   },
+   {
+    "point": "A later SET (two_phase = false) skipped the prepared-transaction check, so commits were re-sent as regular transactions, causing self-deadlocks, duplicate data or orphaned prepared transactions.",
+    "quote": "transactions and disabled two_phase anyway. When those transactions were\ncommitted on the publisher, their changes were re-sent as regular\ntransactions instead of COMMIT PREPARED, leading to self-deadlocks,"
+   },
+   {
+    "point": "REFRESH PUBLICATION with copy_data = true was wrongly allowed, which could stream prepared transactions during initial sync and apply them as empty prepares.",
+    "quote": "This\ncould stream prepared transactions during the initial sync of newly added\ntables and apply them as empty prepares."
+   }
+  ],
+  "key_files": [
+   "src/backend/commands/subscriptioncmds.c"
+  ],
+  "commit": "fc1900915b1"
+ }
+]

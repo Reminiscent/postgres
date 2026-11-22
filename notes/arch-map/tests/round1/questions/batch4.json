@@ -1,0 +1,273 @@
+[
+ {
+  "id": "B4-01",
+  "subsystem": 9,
+  "commit": "6a146d29750",
+  "date": "2026-11-04",
+  "type": "RISK",
+  "question": "A change in PostgreSQL 15 taught the WAL reading facility to decode WAL into a circular buffer of decoded records. Records too large for the buffer get their own separate allocations, and the reader keeps decoded records queued until the caller releases them. The goal was to support looking ahead in the WAL stream while still letting existing callers read records one by one as before.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/transam/xlogreader.c"
+  ],
+  "key_points": [
+   {
+    "point": "Freeing a reader did not release oversized records still sitting in the decode queue, so memory leaked.",
+    "quote": "Commit 3f1ce97346 introduced a circular buffer for decoded WAL records,"
+   },
+   {
+    "point": "The leak matters in long-lived memory contexts that are not reset, e.g. the checkpointer when reading PREPARE records for two-phase state.",
+    "quote": "However, XLogReaderFree() did not release separately allocated"
+   }
+  ],
+  "intro_commit": "3f1ce973467"
+ },
+ {
+  "id": "B4-02",
+  "subsystem": 9,
+  "commit": "70b7e968d57",
+  "date": "2026-08-18",
+  "type": "ALT",
+  "question": "A session can wait until the standby's WAL write/replay position reaches a given LSN (a WAIT-style command). Waiters sit in a shared priority structure; whoever advances the position removes satisfied waiters from it and sets their latch. If the position that triggered a wakeup moves backwards before the waiter re-checks it, as can happen when WAL streaming restarts, the waiter finds its condition unmet and goes back to sleep while no longer registered, so later WAL progress never wakes it. The fix makes such a waiter re-register itself and loop again.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) An obvious alternative would be to handle query cancel and timeout checks after re-registering the waiter on each loop iteration (as it did at the end of each pass before). Why was it not chosen?",
+  "key_files": [
+   "src/backend/access/transam/xlogwait.c"
+  ],
+  "key_points": [
+   {
+    "point": "Interrupts are processed before re-registering so that repeated stale wakeups cannot delay cancellation indefinitely.",
+    "quote": "Process interrupts before re-registering rather than after, so that a"
+   },
+   {
+    "point": "Side effect: a pending cancel now wins over an expired timeout.",
+    "quote": "wakeup which goes stale again cannot postpone cancellation, however often"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B4-03",
+  "subsystem": 9,
+  "commit": "69ed7fd7e9d",
+  "date": "2026-08-04",
+  "type": "WHY",
+  "question": "On a server with replication slots and a spread checkpoint, pg_wal can grow more than necessary: WAL segments are retained although no slot needs them any longer, until the next checkpoint or restartpoint. The spread phase of a checkpoint can last several minutes. During that time active slots keep advancing the oldest WAL position they require, but the WAL retention limit used when recycling old segments at the end of the checkpoint was computed from older saved slot values.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/access/transam/xlog.c"
+  ],
+  "key_points": [
+   {
+    "point": "Reorder checkpoint phases: perform the slot checkpoint (and related logical snapshot and rewrite cleanup) later, after buffer writes and sync requests, just before two-phase checkpointing.",
+    "quote": "During that time, active replication slots could advance their"
+   },
+   {
+    "point": "Driven by the need for WAL retention decisions to use the latest slot state, since the gap between the slot save and WAL cleanup is minutes in spread checkpoints.",
+    "quote": "restart_lsn. However, replicationSlotMinLSN had already been"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B4-04",
+  "subsystem": 9,
+  "commit": "b5545d3f5f9",
+  "date": "2026-11-05",
+  "type": "WHY",
+  "question": "An incremental backup taken after VACUUM truncated a table can restore stale visibility map bits when both data checksums and wal_log_hints are disabled. If the restored table grows again, the stale bits can make VACUUM skip required freezing and advance relfrozenxid past unfrozen tuples, or make index-only scans return deleted rows. Truncating the heap clears bits for removed pages in the last remaining visibility map page, but with those settings that page is not separately WAL-logged, and the truncation record precedes the incremental backup's start LSN so recovery does not replay it.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/postmaster/walsummarizer.c"
+  ],
+  "key_points": [
+   {
+    "point": "When summarizing a truncation record, also mark the last remaining visibility map page as modified so incremental backups include its current contents.",
+    "quote": "a VM page boundary and the remaining page does not need to change."
+   },
+   {
+    "point": "Done conservatively even when truncation falls on a VM page boundary, because the summarizer cannot rely on the page having been WAL-logged.",
+    "quote": "Fix this by marking the last remaining VM page as modified when"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B4-05",
+  "subsystem": 10,
+  "commit": "10b6e2a3d66",
+  "date": "2026-10-06",
+  "type": "RISK",
+  "question": "A change made PostgreSQL toggle logical decoding dynamically: the effective WAL level rises when the first logical replication slot is created. Backends learn about the change through a process-signal barrier. The effective logging mode is allowed to change within a transaction only until an XID is assigned; after that it is fixed for the rest of the transaction, so a backend with an XID defers the update and applies it when the transaction ends.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/transam/xact.c",
+   "src/backend/replication/logical/logicalctl.c"
+  ],
+  "key_points": [
+   {
+    "point": "A failed transaction block keeps its XID until ROLLBACK, so a barrier absorbed in that state was deferred and never applied at cleanup.",
+    "quote": "transaction block keeps its XID until ROLLBACK, so a barrier absorbed"
+   },
+   {
+    "point": "The next transaction ran with stale logical-info state, so after logical decoding was enabled its changes were written without logical information and silently skipped by decoding.",
+    "quote": "while idle in that state was deferred, and CleanupTransaction() did"
+   }
+  ],
+  "intro_commit": "67c20979ce7"
+ },
+ {
+  "id": "B4-06",
+  "subsystem": 10,
+  "commit": "cc33773482e",
+  "date": "2026-10-07",
+  "type": "RISK",
+  "question": "A change made the standby's WAL receiver avoid sending duplicate status replies to the primary. When the startup process applies WAL and asks the receiver to send an apply notification, the receiver used to reply unconditionally even if the WAL locations had not advanced, which could reset the reported replication lag. The change made the receiver reply only if the apply location had advanced since the last status update, even when notification is requested.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/replication/walreceiver.c"
+  ],
+  "key_points": [
+   {
+    "point": "With synchronous_commit = remote_apply and wal_receiver_status_interval = 0, a commit could stay blocked after the standby applied it, because the reply was never sent.",
+    "quote": "Commit 400a790a48e introduced this regression while avoiding unnecessary"
+   },
+   {
+    "point": "With wal_sender_timeout and wal_receiver_timeout disabled the wait can be indefinite; the remote_apply guarantee of timely acknowledgment is violated.",
+    "quote": "duplicate standby status replies. It changed apply notifications from forced"
+   }
+  ],
+  "intro_commit": "400a790a48e"
+ },
+ {
+  "id": "B4-07",
+  "subsystem": 10,
+  "commit": "b614de4876b",
+  "date": "2026-07-29",
+  "type": "ALT",
+  "question": "A cascading standby can fail to reconnect to its upstream standby with an error that the requested starting point is ahead of the WAL flush position, after it has fallen back to archive recovery. Archive recovery replays whole segment files, so the cascade's next read position lands at the start of the following segment, while the upstream's reported flush position is still inside the segment just replayed. The fix has the receiving side learn the upstream's current flush position (which the IDENTIFY_SYSTEM replication command already returns but the client library discarded) and wait and retry before issuing START_REPLICATION. The fix is meant to be back-patched to old branches.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) An obvious alternative would be to change the return value of the client library's identify-system call so it hands the flush position back to its caller. Why was it not chosen?",
+  "key_files": [
+   "src/backend/replication/libpqwalreceiver/libpqwalreceiver.c",
+   "src/backend/replication/logical/worker.c",
+   "src/backend/replication/walreceiver.c",
+   "src/backend/utils/activity/wait_event_names.txt",
+   "src/include/replication/walreceiver.h"
+  ],
+  "key_points": [
+   {
+    "point": "Changing the function's signature would break ABI compatibility on stable back branches, so the position is passed through a new global variable instead.",
+    "quote": "To preserve ABI compatibility on back branches, the flush position from"
+   },
+   {
+    "point": "Waiting is limited to gaps of at most one segment, and honors the receiver timeout.",
+    "quote": "IDENTIFY_SYSTEM is communicated via a new global variable"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B4-08",
+  "subsystem": 10,
+  "commit": "46024c573bc",
+  "date": "2026-09-24",
+  "type": "WHY",
+  "question": "Logical decoding can export an initial snapshot (for example at slot creation, or for REPACK CONCURRENTLY) built from the decoder's list of committed transactions and then used as an ordinary MVCC snapshot. A transaction that has written its commit WAL record but has not yet updated its commit-log status can be captured as committed by such a snapshot. The snapshot then sets hint bits as if that transaction had aborted, which can corrupt data. The bug exists in all branches and was found by stress-testing REPACK CONCURRENTLY.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/access/transam/xact.c",
+   "src/backend/replication/logical/snapbuild.c"
+  ],
+  "key_points": [
+   {
+    "point": "When building the initial snapshot, wait until the in-doubt committed transactions have removed themselves from the procarray, guaranteeing correct visibility.",
+    "quote": "have removed themselves from procarray, which guarantees correct"
+   },
+   {
+    "point": "Only the initial-snapshot path needs this, because other snapshot uses treat it as historical; so commentary is added for future callers instead of waiting everywhere.",
+    "quote": "Fix by having SnapBuildInitialSnapshot() wait until such transactions"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B4-09",
+  "subsystem": 11,
+  "commit": "27417270ab4",
+  "date": "2026-10-28",
+  "type": "RISK",
+  "question": "REINDEX CONCURRENTLY was added to PostgreSQL. It builds a new index like CREATE INDEX CONCURRENTLY, swaps the old and new indexes by renaming and adjusting dependencies, then drops the old index like DROP INDEX CONCURRENTLY. It applies to TOAST table indexes too, not only to user-table indexes.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/common/toast_internals.c",
+   "src/backend/utils/cache/relcache.c"
+  ],
+  "key_points": [
+   {
+    "point": "Backends holding the TOAST index open kept stale readiness flags from the index catalog row, so they skipped inserting chunks into the new index.",
+    "quote": "A backend that had the TOAST indexes open when the invalidation"
+   },
+   {
+    "point": "After the old index is dropped, reading such values fails with 'missing chunk number 0 for toast value', i.e. TOAST index/table consistency is violated.",
+    "quote": "arrived kept indisready = false for the new index, and did not insert"
+   }
+  ],
+  "intro_commit": "5dc92b844e6"
+ },
+ {
+  "id": "B4-10",
+  "subsystem": 11,
+  "commit": "016b63271fb",
+  "date": "2026-11-09",
+  "type": "RISK",
+  "question": "A change in the type cache avoided looping over all cached type entries when a single relation's cache entry is invalidated. It added a hash table mapping a relation's OID to its composite type's OID, and an array of in-progress lookups so that if a type lookup is interrupted by an invalidation, an error, or a cancel, the hash table could be put back into a consistent state.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/utils/cache/typcache.c"
+  ],
+  "key_points": [
+   {
+    "point": "Subtransaction cleanup cleared the whole in-progress list instead of only entries at the current subtransaction level, and abort-path cleanup allocated memory, risking a second error mid-recovery.",
+    "quote": "it turns out to have multiple bugs. AtEOSubXact_TypeCache() cleared"
+   },
+   {
+    "point": "Deferring hash-table insertion could miss invalidations arriving after the pg_type lookup, so stale type information could be used; some of these are security vulnerabilities.",
+    "quote": "the entire list, instead of only the entries added at or below"
+   }
+  ],
+  "intro_commit": "b85a9d046ef"
+ },
+ {
+  "id": "B4-11",
+  "subsystem": 11,
+  "commit": "0b12a5a7435",
+  "date": "2026-10-29",
+  "type": "ALT",
+  "question": "A partitioned or inherited parent has a CHECK constraint marked NOT ENFORCED. ALTER TABLE ... ALTER CONSTRAINT ... ENFORCED marks the parent's constraint as validated and recurses to children. If a child's matching constraint was already ENFORCED but NOT VALID, the recursion leaves it alone because its enforceability is unchanged, so the child's existing rows are never checked, yet the parent ends up validated. Constraint exclusion can then skip the child and miss violating rows. The fix makes this situation an error with a hint.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) An obvious alternative would be to have the command validate the child's constraint implicitly while recursing. Why was it not chosen?",
+  "key_files": [
+   "src/backend/commands/tablecmds.c"
+  ],
+  "key_points": [
+   {
+    "point": "Validating implicitly would be inconsistent: run directly on the child, the command does not validate an enforced NOT VALID constraint.",
+    "quote": "implicitly instead was considered, but ALTER CONSTRAINT ... ENFORCED"
+   },
+   {
+    "point": "So it raises the same error (with a hint to validate the child first) that ALTER TABLE ... INHERIT already raises in that situation.",
+    "quote": "does not validate an ENFORCED NOT VALID constraint when run directly"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B4-12",
+  "subsystem": 11,
+  "commit": "0b776de09ed",
+  "date": "2026-09-03",
+  "type": "WHY",
+  "question": "A session that created temporary objects can hang when it exits, if its default transaction mode is SERIALIZABLE READ ONLY DEFERRABLE and a concurrent serializable transaction has been prepared. During backend exit, cleanup of temporary relations starts with a transaction snapshot that honors the session's default settings and so waits for a safe serializable snapshot. The wait happens with interrupts held off, so even pg_terminate_backend() cannot cancel it, and it lasts until the prepared transaction is resolved.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/catalog/namespace.c"
+  ],
+  "key_points": [
+   {
+    "point": "Use a catalog snapshot for the temporary-relation cleanup instead of a regular transaction snapshot, avoiding the deferrable safe-snapshot wait.",
+    "quote": "Temporary-relation cleanup only needs an active MVCC snapshot for fetching"
+   },
+   {
+    "point": "Cleanup only needs an MVCC snapshot to fetch TOAST data from catalog tuples, so user isolation defaults need not apply.",
+    "quote": "TOAST data from catalog tuples while dropping temporary objects. It does"
+   }
+  ],
+  "intro_commit": null
+ }
+]

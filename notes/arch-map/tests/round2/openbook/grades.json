@@ -1,0 +1,10 @@
+{
+"R1-07":{"P":{"match_rank":1,"scores":[1,0.5],"top_conf":"medium","wrong_confident":false},"Q":{"match_rank":1,"scores":[1,0.5],"top_conf":"low","wrong_confident":false}},
+"R1-09":{"P":{"match_rank":0,"scores":[0,0.5],"top_conf":"low","wrong_confident":false},"Q":{"match_rank":0,"scores":[0,0],"top_conf":"low","wrong_confident":false}},
+"R2-03":{"P":{"match_rank":1,"scores":[1,0.5],"top_conf":"medium","wrong_confident":false},"Q":{"match_rank":0,"scores":[0,0],"top_conf":"low","wrong_confident":false}},
+"R3-02":{"P":{"match_rank":0,"scores":[0,0.5,0],"top_conf":"low","wrong_confident":false},"Q":{"match_rank":1,"scores":[1,1,0],"top_conf":"low","wrong_confident":false}},
+"R3-03":{"P":{"match_rank":0,"scores":[0,0,0],"top_conf":"low","wrong_confident":false},"Q":{"match_rank":1,"scores":[1,1,0.5],"top_conf":"high","wrong_confident":false}},
+"R3-04":{"P":{"match_rank":1,"scores":[1,1,0.5],"top_conf":"high","wrong_confident":false},"Q":{"match_rank":1,"scores":[1,0.5,1],"top_conf":"medium","wrong_confident":false}},
+"R4-01":{"P":{"match_rank":1,"scores":[1,1],"top_conf":"high","wrong_confident":false},"Q":{"match_rank":1,"scores":[1,1],"top_conf":"high","wrong_confident":false}},
+"R4-05":{"P":{"match_rank":1,"scores":[1,1,0],"top_conf":"medium","wrong_confident":false},"Q":{"match_rank":1,"scores":[1,1,0.5],"top_conf":"medium","wrong_confident":false}}
+}

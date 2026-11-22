@@ -1,0 +1,290 @@
+[
+ {
+  "id": "B1-01",
+  "subsystem": 1,
+  "commit": "5bf919736b2",
+  "date": "2026-11-11",
+  "type": "RISK",
+  "question": "A recent feature added a flag that background workers can set to say they are 'interruptible'. Such workers connected to a database are terminated when that database is the target of ALTER DATABASE ... RENAME, ALTER DATABASE ... SET TABLESPACE, CREATE DATABASE (as template) or DROP DATABASE, giving them the same behaviour as ordinary backends and autovacuum workers, which are stopped by those commands. Workers without the flag keep the historical behaviour of never being terminated.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/postmaster/bgworker.c"
+  ],
+  "key_points": [
+   {
+    "point": "Termination marked the worker slots so the supervisor unregistered the workers permanently, ignoring their configured restart interval, even when the database command later failed.",
+    "quote": "workers' slots, so the postmaster unregistered them regardless of\nbgw_restart_time, even if the database command failed afterwards."
+   },
+   {
+    "point": "The fix signals the workers directly, as is done for autovacuum workers, so restart policy (restart interval) decides whether the worker comes back.",
+    "quote": "Let's signal the workers directly instead, like CountOtherDBBackends()\ndoes for autovacuum workers, so that they are restarted based on"
+   },
+   {
+    "point": "This lets extension authors choose whether an interruptible worker is restarted, e.g. when the target database comes from a reloadable GUC.",
+    "quote": "decide if an interruptible worker can be restarted or not, instead of"
+   }
+  ],
+  "intro_commit": "f1e251be80a"
+ },
+ {
+  "id": "B1-02",
+  "subsystem": 1,
+  "commit": "12f866cd5f7",
+  "date": "2026-10-07",
+  "type": "ALT",
+  "question": "After a backend crash the server enters crash recovery and relaunches the checkpointer, I/O workers and the startup process. If an administrator requests a smart or fast shutdown very early in this restart phase, the server can hang forever waiting for the checkpointer and I/O workers to exit. The reason is that the shutdown logic adds them to the set of processes to wait for, but the freshly relaunched processes ignore the termination signal sent by a normal shutdown, and the timer that would escalate to SIGKILL has already been reset.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) The fix makes the shutdown send an immediate-stop signal instead when the crash flag is set. An obvious alternative would be to have the shutdown code signal each child process directly. Why was that not chosen?",
+  "key_files": [
+   "src/backend/postmaster/postmaster.c"
+  ],
+  "key_points": [
+   {
+    "point": "Going through the common fatal-error routine also arms the abort timer so SIGKILL can fire.",
+    "quote": "SIGQUIT is now sent instead of SIGTERM when FatalError is set, via\nHandleFatalError(), arming AbortStartTime."
+   },
+   {
+    "point": "Signalling children directly would not mark the startup process as signaled, so its exit would later be reported as a failure.",
+    "quote": "rather than signaling the children directly matters for the startup\nprocess: TerminateChildren() marks the startup process as signaled, so\nits exit is not later reported as a failure."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B1-03",
+  "subsystem": 1,
+  "commit": "ead8f696b7c",
+  "date": "2026-08-20",
+  "type": "WHY",
+  "question": "On a server that is reinitializing after a crash, a freshly relaunched startup process may die before WAL redo begins, for example because process initialization fails (reported on Windows with the console gone). Instead of the server exiting, it stays stuck in the startup state and cannot be shut down. Earlier code had a direct shortcut for 'startup process died' that was removed in favour of the general child-crash routine, which cleans up other children instead of orphaning them. That general routine returns early if the fatal-error flag is already set, which is exactly the situation during crash reinitialization.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/postmaster/postmaster.c"
+  ],
+  "key_points": [
+   {
+    "point": "The general crash routine does nothing when the fatal-error flag is already set, which is the crash-restart case, leaving the state machine stuck.",
+    "quote": "However, HandleChildCrash() does nothing if FatalError is already set,\nand that is exactly the case while reinitializing after a crash: a"
+   },
+   {
+    "point": "The fix restores the old shortcut for the fatal-error case: signal remaining children and move to the no-children state so the server can exit without orphans.",
+    "quote": "if FatalError is set when the startup process crashes, signal the\nremaining children and move to PM_NO_CHILDREN, so as the postmaster can"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B1-04",
+  "subsystem": 1,
+  "commit": "0fbf785b13e",
+  "date": "2026-08-10",
+  "type": "WHY",
+  "question": "A user who has been granted EXECUTE on the functions of the amcheck extension can end up running arbitrary functions with the privileges of the owners of other users' indexes. This happens when an index is built on an expression that calls an SQL or PL/pgSQL function, since the checker evaluates the index expressions while the schema search path is still the caller's. Expressions like lower(col) are not affected because they were resolved at index creation. The documentation only warned about data disclosure after such a GRANT, not about code execution. This is tracked as a security issue.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/utils/init/usercontext.c"
+  ],
+  "key_points": [
+   {
+    "point": "The vulnerability is function execution as index owner through search_path-dependent index expressions.",
+    "quote": "A grantee of amcheck function EXECUTE privilege could execute arbitrary\nfunctions as the owners of expression indexes that depend on the search\npath."
+   },
+   {
+    "point": "The fix empties search_path in the sandboxed context; the risk of new errors is judged low since auto-analyze already behaves this way.",
+    "quote": "Such indexes have seen errors during auto-analyze\nsince CVE-2018-1058 commit 582edc369cdbd348d68441fc50fa26a84afd0c1a, and"
+   },
+   {
+    "point": "A comment is left at the one other sandbox entrance that does not empty search_path, where that choice was valid.",
+    "quote": "Leave a comment on the one other sandbox entrance that doesn't empty\nsearch_path.  In its case, the choice was valid."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B1-05",
+  "subsystem": 2,
+  "commit": "208ea05a51b",
+  "date": "2026-11-09",
+  "type": "RISK",
+  "question": "A change moved the handling of query-cancel requests earlier in connection setup: instead of being done after the backend is fully started, the cancel request is now processed by the freshly forked process while it is still in the pre-authentication phase. The process looks up the target backend and compares cancel keys using shared-memory state. The goal was to let the forked process generate and advertise its own cancel key and look it up in a shared signalling array rather than keeping the keys in the supervisor.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/tcop/backend_startup.c"
+  ],
+  "key_points": [
+   {
+    "point": "The startup-phase timeout and SIGTERM handlers assume shared memory is never touched so a hard exit is safe; cancel processing now takes a spinlock in shared memory.",
+    "quote": "Both assume that shared memory is never touched, meaning that a hard\nexit() is fine, as no cleanup action need to be taken."
+   },
+   {
+    "point": "If the timeout or SIGTERM arrives while the spinlock is held, the process exits holding it; the next user of that proc slot waits forever and the server PANICs after about a minute.",
+    "quote": "would wait indefinitely for the spin lock, crashing the server on PANIC\nafter one minute of wait."
+   },
+   {
+    "point": "The fix stashes the received cancel request and processes it only after the exit-on-signal handlers are cleared.",
+    "quote": "This commit changes the cancel request handling so as a request received\nis stashed instead of immediately processed."
+   }
+  ],
+  "intro_commit": "9d9b9d46f3c"
+ },
+ {
+  "id": "B1-06",
+  "subsystem": 2,
+  "commit": "07be6f384ca",
+  "date": "2026-10-26",
+  "type": "WHY",
+  "question": "The server supports several TLS configurations selected by SNI host name, listed in a hosts configuration file. On Windows and in builds where every new backend re-executes and reloads the SSL configuration, there is no previously loaded configuration to fall back on. If just one host entry fails to load (say a bad key file), the whole SSL configuration is discarded and the backend then runs without SSL for every host, including the healthy ones.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/libpq/be-secure-openssl.c"
+  ],
+  "key_points": [
+   {
+    "point": "In child processes the failed entry is kept without an SSL context rather than discarding everything.",
+    "quote": "keeping the failed entry without an SSL context in child processes"
+   },
+   {
+    "point": "Only handshakes that select the broken host fail, other hosts keep working.",
+    "quote": "and failing the handshake only for connections selecting it."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B1-07",
+  "subsystem": 2,
+  "commit": "bca67e5a33b",
+  "date": "2026-09-17",
+  "type": "ALT",
+  "question": "Setting the GUC that lists allowed OAuth validator libraries to a value consisting only of whitespace makes the supervisor process crash on reload. The check function that validates the setting handled the empty string specially but did not account for a string with only spaces, which then led to an invalid result being used.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) An obvious alternative would be to add another special case that tests for the whitespace-only string before parsing, as done for the empty string. Why was that not chosen?",
+  "key_files": [
+   "src/backend/libpq/auth-oauth.c"
+  ],
+  "key_points": [
+   {
+    "point": "The fix always parses the value as a list and treats an empty parsed list as 'input was empty', covering all empty variants uniformly.",
+    "quote": "Instead of testing for the empty string cases, pass the config\nvalue to SplitDirectoriesString unconditionally.  If an empty list is\nreturned then the input string was empty."
+   },
+   {
+    "point": "A non-NULL assertion guards the string copy since the C variable starts as NULL even though users cannot set NULL.",
+    "quote": "Check the parsed list instead.  Assert that the GUC string is non-NULL\nbefore pstrdup(); users cannot set it to NULL, but the C variable is"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B1-08",
+  "subsystem": 2,
+  "commit": "811527d9d46",
+  "date": "2026-11-01",
+  "type": "WHY",
+  "question": "When the Python procedural language validates a function at CREATE FUNCTION time and the function has polymorphic argument types, the user gets an obscure internal error about not being able to determine a result type, instead of the intended clear message that polymorphic arguments are unsupported. The generic function-cache code builds a lookup key from the call information; in validation mode the caller supplies only a stripped-down, mostly empty call descriptor, and the key construction tries to resolve the result row type from it. The other languages never combined the two relevant options, so this was not noticed earlier.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/utils/cache/funccache.c"
+  ],
+  "key_points": [
+   {
+    "point": "The key builder asks for the result type from an incomplete call descriptor in validation mode, which fails.",
+    "quote": "was careless about this and would call get_call_result_type()\nif asked to, which would fail in any but the simplest cases."
+   },
+   {
+    "point": "The fix skips filling the result tuple descriptor in validation mode; the resulting entry never matches real calls, as in other validation cases.",
+    "quote": "To fix, just skip trying to fill the result type tupdesc when in\nvalidation mode."
+   },
+   {
+    "point": "Root cause is lack of clarity about what the descriptor contains in validation mode, so comments specifying it are added.",
+    "quote": "The root cause here is lack of clarity about what we expect the\npassed FunctionCallInfo to contain in validation mode, so add"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B1-09",
+  "subsystem": 12,
+  "commit": "ab713cdcdbf",
+  "date": "2026-09-19",
+  "type": "RISK",
+  "question": "SQL/JSON query functions JSON_EXISTS, JSON_QUERY, JSON_VALUE (later also JSON_TABLE) were added to let users run a jsonpath against a JSON value, with a PASSING clause that supplies named variables to the path expression. The PASSING values are evaluated as ordinary expressions and handed to the path evaluator.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/utils/adt/jsonpath_exec.c"
+  ],
+  "key_points": [
+   {
+    "point": "A text value passed in PASSING may be an out-of-line TOAST pointer; the code used the raw varlena contents without detoasting, so wrong contents were returned.",
+    "quote": "directly the contents of a varlena.  For a varatt_external\n(varatt_external[oid/oid8] on HEAD), this ignored that the contents of\nthe varlena need to be detoasted, leading to incorrect contents"
+   },
+   {
+    "point": "The fix detoasts the value as the json/jsonb cases already do; the detoasted copy lives in the per-row expression memory context.",
+    "quote": "Let's detoast the value, like the jsonb and json cases.  b0feda79fdf0"
+   }
+  ],
+  "intro_commit": "6185c9737cf"
+ },
+ {
+  "id": "B1-10",
+  "subsystem": 12,
+  "commit": "170c9344def",
+  "date": "2026-08-19",
+  "type": "RISK",
+  "question": "A fast path for foreign-key checks keeps cached per-constraint metadata (comparison function lookup structures and similar) for the referenced index. A leak was found where this cached metadata was never released when the cached constraint information was invalidated, and the fix made the invalidation callback free it immediately.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/utils/adt/ri_triggers.c"
+  ],
+  "key_points": [
+   {
+    "point": "The callback's rule is that entries may be in use at invalidation time, so they should be marked invalid, not freed; the metadata is subject to the same rule.",
+    "quote": "breaks the rule stated\natop the callback: entries may have active references at invalidation\ntime, so we mark them invalid rather than removing them."
+   },
+   {
+    "point": "Check loops run index scans, tuple locks and user cast/equality functions that can process invalidations (even DDL in a user function), so freed memory was read and called through.",
+    "quote": "The callback then freed the object still in use,\nso the loop read freed memory and called through FmgrInfos in it."
+   },
+   {
+    "point": "Fix unlinks the metadata but defers freeing to transaction end when no check is on the stack.",
+    "quote": "Fix by unlinking the metadata from the entry, so the next check\nrebuilds it as before, but deferring the actual free to AtEOXact_RI(),"
+   }
+  ],
+  "intro_commit": "e484b0eea61"
+ },
+ {
+  "id": "B1-11",
+  "subsystem": 12,
+  "commit": "e5f6a7a28c4",
+  "date": "2026-11-04",
+  "type": "WHY",
+  "question": "A foreign key check or action runs through a cached prepared plan. If the check's query invokes user code, such as a cast function or a BEFORE ROW trigger that performs its own DML on the same table, a nested foreign-key check for the same constraint can run while the outer one is still executing. Take a self-referencing ON DELETE CASCADE constraint with a BEFORE DELETE trigger that does GRANT/REVOKE on the table (invalidating the plan) and then deletes more rows. The server can then read freed memory, and a cache-clobbering test build makes the invalidation deterministic.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/utils/adt/ri_triggers.c"
+  ],
+  "key_points": [
+   {
+    "point": "A cached plan found invalid was freed immediately without knowing whether an outer check was still executing it.",
+    "quote": "if SPI_plan_is_valid() returns false, without tracking whether the\nplan might be in use.  That can cause _SPI_execute_plan() to read\nfreed memory."
+   },
+   {
+    "point": "The fix keeps a stack of plans being executed (popped on error via PG_FINALLY), frees invalid plans at once if not on the stack, else detaches and queues them.",
+    "quote": "Fix by keeping a stack of the plans that every ri_PerformCheck() call\nin progress is executing, pushed before SPI_execute_snapshot() and\npopped whether it returns or throws an error, the latter using"
+   },
+   {
+    "point": "Queued plans are freed when checks finish and not on the stack; leftovers are freed at end of transaction.",
+    "quote": "Whenever a check finishes, the queued plans\nthat are no longer on the stack are freed."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B1-12",
+  "subsystem": 12,
+  "commit": "7b84cf8cfc7",
+  "date": "2026-10-19",
+  "type": "WHY",
+  "question": "Memory contexts of the general-purpose allocator kind are recycled through per-size free lists when a context is deleted and a new one with similar parameters is created. Contexts with different maximum block sizes can land in the same free-list slot. After reuse, some allocations are placed on dedicated blocks when they should not be, causing excessive malloc calls, or memory is not returned by pfree until the context resets. The effects are only inefficiency and some performance instability depending on which recycled context was on top of the list.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/utils/mmgr/aset.c"
+  ],
+  "key_points": [
+   {
+    "point": "On reuse only the maximum block size was updated while the derived chunk-size threshold was not recomputed.",
+    "quote": "reusing a context from one of the context_freelists,\nwe updated maxBlockSize, but we failed to adjust allocChunkLimit, even"
+   },
+   {
+    "point": "The fix moves the threshold calculation into a helper function and calls it again when reusing a context.",
+    "quote": "we move the allocChunkLimit calculation code into a helper\nfunction and call that to reset the allocChunkLimit when reusing a"
+   }
+  ],
+  "intro_commit": null
+ }
+]

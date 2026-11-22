@@ -1,0 +1,315 @@
+[
+ {
+  "id": "B3-01",
+  "subsystem": 6,
+  "commit": "d42c5457e51",
+  "date": "2026-10-26",
+  "type": "RISK",
+  "question": "Some years ago a change was made to B-tree page deletion to fix a race condition. The problem was that a page chosen for deletion could become the rightmost child of its parent after the check for that, because the parent might be split while the locks on the relevant pages were not yet held; for a chain of to-be-deleted pages this could leave a half-dead page that could never be deleted and a keyspace temporarily \"out-of-whack\". The change reworked the algorithm: after checking only the topmost page of the chain, pages are deleted bottom up and then unlinked top to bottom, so every intermediate state resembles a page split in progress. The deletion of a multi-level subtree is logged in WAL as an atomic action that updates a half-dead leaf page, and the leaf is briefly unlocked and relocked during the second phase.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/nbtree/nbtpage.c"
+  ],
+  "key_points": [
+   {
+    "point": "While the leaf page was unlocked, a concurrent split of the half-dead page's left sibling could change its sibling link, so the code later WAL-logged stale sibling information.",
+    "quote": "It was just about possible for a concurrent split of the half-dead\npage's left sibling page to update the half-dead page's left sibling"
+   },
+   {
+    "point": "Because the leaf buffer is registered as will-be-initialized in the record, the stale value was written into the page image at replay, corrupting the half-dead leaf on standbys (visible via wal_consistency_checking).",
+    "quote": "use REGBUF_WILL_INIT for the half-dead leaf page's buffer, using a stale\nvalue led to corrupted half-dead leaf pages on standbys.  This bug has"
+   },
+   {
+    "point": "The fix re-reads the sibling links from the leaf after it is relocked, before logging.",
+    "quote": "To fix, re-read btpo_prev (and btpo_next) from the leaf once it has been\nrelocked, before the links are logged."
+   }
+  ],
+  "intro_commit": "efada2b8e92"
+ },
+ {
+  "id": "B3-02",
+  "subsystem": 6,
+  "commit": "7164dcb6653",
+  "date": "2026-09-11",
+  "type": "RISK",
+  "question": "A new REPACK (CONCURRENTLY) mode was added. It copies the table under a weak lock while a background process uses logical decoding to collect concurrent changes, which are re-applied to the new copy just before the files are swapped. Changes that REPACK itself applies to the transient copy must not appear in the logical stream, so the heap code gained a way for callers to mark updates as not to be logically logged. Insert paths already supported such suppression for heap rewrites, and the change extended the same flag to the update path.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/heap/heapam.c"
+  ],
+  "key_points": [
+   {
+    "point": "Update honoured the suppress-logical flag for the main tuple but passed zero to the TOAST code, so out-of-line value chunks were still logged for decoding.",
+    "quote": "Previously, heap_update() honored TABLE_UPDATE_NO_LOGICAL for the main\ntuple but passed a hardcoded 0 to the tuple toaster, so the tuples it\nwrote to the TOAST relation were logged for decoding anyway."
+   },
+   {
+    "point": "Decoding then reassembled the TOAST value and dereferenced a new tuple that the suppressed main record does not carry, crashing the backend; reachable only with an output plugin that requests rewrite changes.",
+    "quote": "stream. Logical decoding therefore reassembled the TOAST value and\nthen dereferenced a new tuple that the suppressed record doesn't\ncarry, crashing the backend."
+   },
+   {
+    "point": "The fix passes the insert-side no-logical flag down to the toaster when the update flag is set.",
+    "quote": "Fix this by passing HEAP_INSERT_NO_LOGICAL down to the tuple toaster\nwhen TABLE_UPDATE_NO_LOGICAL is set."
+   }
+  ],
+  "intro_commit": "28d534e2ae0"
+ },
+ {
+  "id": "B3-03",
+  "subsystem": 6,
+  "commit": "068c9aaec31",
+  "date": "2026-10-15",
+  "type": "WHY",
+  "question": "Two scenarios involve a tuple locked or updated by a transaction that is aborting or has crashed, where the tuple's xmax is a MultiXactId. In the first, a conflicting transaction has just marked itself aborted in the commit-status log but has not yet removed itself from the list of running transactions; a concurrent session checking for conflicts against the multixact decides there is none, goes ahead and updates the row again, and then fails with ERROR: new multixact has more than one updating member. In the second, an updating transaction that was part of a multixact crashed while another (for example a prepared) transaction still holds a row lock; an UPDATE of that row is then wrongly reported as having lost a concurrent-update conflict even though the row could be updated.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/access/heap/heapam.c",
+   "src/backend/access/transam/xact.c"
+  ],
+  "key_points": [
+   {
+    "point": "Code tested for abort with a direct 'did abort' check instead of the usual order of: not in progress, then not committed.",
+    "quote": "transaction aborted is to first call TransactionIdIsInProgress(), and\nthen !TransactionIdDidCommit().  A couple places didn't get the memo,\nand used TransactionIdDidAbort() incorrectly."
+   },
+   {
+    "point": "In the conflict-check path an aborting-but-still-running updater was treated as non-conflicting, which later led to an error when expanding the multixact.",
+    "quote": "running, and throw an ERROR: new multixact has more than one updating"
+   },
+   {
+    "point": "In the update path a crashed updater was considered committed, producing a spurious TM_Updated result.",
+    "quote": "Because it used TransactionIdDidAbort(), if the updating\ntransaction crashed, it was considered as committed and heap_update()"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B3-04",
+  "subsystem": 6,
+  "commit": "96c99955b62",
+  "date": "2026-10-05",
+  "type": "WHY",
+  "question": "Cost-based delay sleeps (maintenance runs of VACUUM and ANALYZE, manual or automatic, pause periodically to honour their cost limits) are being taken at several places while the process is holding buffer content locks or other lightweight locks. Sleeping with a lock held can block other backends that need the same lock, and the sleep path may reload the configuration file, which is not safe inside a critical section or while holding locks. Separately, the bulk-delete phase of one index type that organises its entries in buckets could not be interrupted by a shutdown request or query cancel for its whole duration, because its inner loop held a lock chain and the surrounding loop had no interrupt or delay check.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/access/gin/ginfast.c",
+   "src/backend/access/hash/hash.c",
+   "src/backend/commands/analyze.c",
+   "src/backend/commands/vacuum.c",
+   "src/backend/utils/activity/pgstat.c"
+  ],
+  "key_points": [
+   {
+    "point": "Callers were changed so the delay is no longer reached while holding locks: one redundant call removed, one hoisted to the caller's per-bucket loop, one moved between pages in sampling.",
+    "quote": "In hashbucketcleanup(), move the vacuum_delay_point() call up the\nstack to its caller."
+   },
+   {
+    "point": "The delay function itself was made to return quickly without sleeping when interrupts cannot be processed.",
+    "quote": "holding locks, and also make vacuum_delay_point() return quickly\nwithout sleeping if it's called while interrupts cannot be processed."
+   },
+   {
+    "point": "Hoisting the call makes the whole bulk-delete phase interruptible between buckets, but each bucket's pages must still be processed in one go.",
+    "quote": "Now it can be interrupted between\nbuckets."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B3-05",
+  "subsystem": 7,
+  "commit": "10b6e2a3d66",
+  "date": "2026-10-06",
+  "type": "RISK",
+  "question": "PostgreSQL gained the ability to turn logical decoding on and off dynamically depending on whether any logical replication slot exists, even with wal_level set to replica. Enabling it raises the effective WAL level, which each backend learns about through a procsignal barrier. The effective level may change inside a transaction until an XID has been assigned; after that, a backend holding an XID defers applying the change until the transaction ends, and the deferred update is applied when the transaction aborts.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/transam/xact.c",
+   "src/backend/replication/logical/logicalctl.c"
+  ],
+  "key_points": [
+   {
+    "point": "A transaction block that fails keeps its XID until ROLLBACK, so a barrier absorbed while idle in that state was deferred and the end-of-transaction cleanup did not apply it.",
+    "quote": "However, a failed\ntransaction block keeps its XID until ROLLBACK, so a barrier absorbed\nwhile idle in that state was deferred, and CleanupTransaction() did"
+   },
+   {
+    "point": "The next transaction ran with the stale WAL-level setting, so changes made right after logical decoding was enabled were written without logical information and silently skipped by decoding.",
+    "quote": "changes were written without logical information and silently skipped\nby decoding."
+   },
+   {
+    "point": "The fix moves the application of the pending update to the final cleanup step, run after the top-level XID is reset so the barrier is not deferred again.",
+    "quote": "Fix by applying the pending update in CleanupTransaction() instead of\nAbortTransaction()."
+   }
+  ],
+  "intro_commit": "67c20979ce7"
+ },
+ {
+  "id": "B3-06",
+  "subsystem": 7,
+  "commit": "e0c160c3072",
+  "date": "2026-09-12",
+  "type": "ALT",
+  "question": "On a standby, WAIT FOR LSN lets a session block until replay, write or flush has reached a target position. A session that blocks there may still be holding heavyweight locks taken by earlier statements in its transaction. If recovery needs one of those locks, directly or through another backend, before reaching the target, replay stops and the session never gets its target: a deadlock that the deadlock detector cannot see, since the dependence on replay is not registered with the heavyweight-locks machinery. With unlimited standby conflict delays it can persist forever. Write and flush targets are affected too: their positions are floored by the replay position, and if WAL receiving stops before the target, a blocked recovery cannot restart the receiver or recycle old WAL, so pg_wal can fill up. The fix is a conservative check that rejects such requests when the session already holds any granted heavyweight locks, and the error reports one of them.\nAn obvious alternative would be to apply the restriction only to replay waits, or to allow write and flush targets whenever a WAL receiver is active when the session starts blocking. Why was this not chosen?\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.",
+  "key_files": [
+   "src/backend/commands/wait.c",
+   "src/backend/storage/lmgr/lock.c",
+   "src/include/storage/lock.h"
+  ],
+  "key_points": [
+   {
+    "point": "An active receiver at the start of the wait does not guarantee progress: if reception stops before the target, blocked replay cannot restart it or advance restartpoints, so the wait can hang or exhaust pg_wal.",
+    "quote": "does not guarantee that the wait can finish while replay remains blocked."
+   },
+   {
+    "point": "Write and flush positions are floored by replay, so without a receiver the startup process is their only source of progress, giving the same cycle as for replay waits.",
+    "quote": "Write and flush waits are restricted as well.  Their positions are floored\nby the replay position, so without an active walreceiver the startup"
+   },
+   {
+    "point": "The accepted cost is that some write and flush waits that an active receiver could satisfy are rejected.",
+    "quote": "also rejects some write and flush waits that an active receiver could\nsatisfy."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B3-07",
+  "subsystem": 7,
+  "commit": "cea96cdfecb",
+  "date": "2026-11-02",
+  "type": "WHY",
+  "question": "A user runs ROLLBACK PREPARED and receives an acknowledgement. The server flushes the abort record to WAL and then marks the transaction aborted in the commit-status log. If a checkpoint chooses its redo pointer between those two steps and the server crashes before the two-phase state file is removed, crash recovery begins after the abort record and restores the transaction as still prepared even though its rollback was acknowledged. On standbys that already replayed the abort record, a later COMMIT PREPARED on the primary could even flip the transaction from aborted to committed. The problem has existed since two-phase commit was introduced, and COMMIT PREPARED does not have it.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/access/transam/twophase.c"
+  ],
+  "key_points": [
+   {
+    "point": "A checkpoint could set its redo pointer between flushing the abort record and updating the commit-status log, so recovery would skip the abort record while the 2PC state file still existed.",
+    "quote": "ROLLBACK PREPARED flushes its abort record and then updates pg_xact.\nNothing prevented a checkpoint from setting its redo pointer between\nthese two steps."
+   },
+   {
+    "point": "Losing an abort is harmless for ordinary transactions but not for a prepared transaction whose state file is still on disk.",
+    "quote": "Losing an abort is harmless for a regular transaction, but not for a\nprepared transaction whose 2PC state file is still on disk."
+   },
+   {
+    "point": "The fix delays checkpoint start around the abort record and the commit-status log update, mirroring COMMIT PREPARED.",
+    "quote": "fixed by setting DELAY_CHKPT_START (delayChkpt in v14) around the\nabort record and the pg_xact update, as done for COMMIT PREPARED."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B3-08",
+  "subsystem": 7,
+  "commit": "5bd2e236e21",
+  "date": "2026-09-28",
+  "type": "WHY",
+  "question": "The pg_locks view has a waitstart column showing when a process began waiting for heavyweight locks. Users noticed that it can show the start time of an earlier wait for a new wait. For a regular backend this happens briefly before the new start time is stored. On a standby, the startup process can show the old time throughout its next wait, making the wait look longer than it is. The stale value survives in two situations: when an earlier wait ended by being canceled, timing out or being chosen as a deadlock victim, and when an earlier wait was successfully granted, with the waker's reset racing against the waiter storing its new start time.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/storage/lmgr/lock.c",
+   "src/backend/storage/lmgr/proc.c"
+  ],
+  "key_points": [
+   {
+    "point": "The start time stayed set after a failed wait that was removed from the wait queue, and after an error that skipped the normal sleep-exit path.",
+    "quote": "Fix this by clearing waitStart in RemoveFromWaitQueue() when a failed wait\nis removed, at the end of ProcSleep() to handle writes made after\nProcWakeup() cleared it, and in LockErrorCleanup() when an error bypasses"
+   },
+   {
+    "point": "The waker could clear the value before the waiter stored its new start time, so a late write from the waiter had to be cleaned up at the end of the sleep routine.",
+    "quote": "Second, even\nafter a successful lock grant, ProcWakeup() could clear it before the waiter\nstored its new start time."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B3-09",
+  "subsystem": 8,
+  "commit": "c40819ebf95",
+  "date": "2026-07-03",
+  "type": "RISK",
+  "question": "A fix was made so that a session cannot access the pages of another session's temporary table. Sequential scans using streaming reads bypassed the existing check in the buffer manager, so a superuser's SELECT, UPDATE, DELETE, MERGE and COPY on another session's temp table silently saw no rows. The fix enforced the \"other session's temp relation\" test at the additional buffer-manager entry points: stream setup, the common read routine, and direct callers of the vectored read start routine.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/storage/buffer/bufmgr.c",
+   "src/include/utils/rel.h"
+  ],
+  "key_points": [
+   {
+    "point": "The fix only covered the read paths; extending an empty other-session temp table did not go through them, so INSERT proceeded without error.",
+    "quote": "But there is a corner case where\nthe other session's temp table is empty -- in this case the INSERT\ncommand bypasses our checks and executes without any errors."
+   },
+   {
+    "point": "The result is inconsistent and leaves an invalid buffer for another session's table in the local buffer pool, which later errors with 'no such file or directory' on flush.",
+    "quote": "Such behavior is inconsistent and erroneous: it leaves an invalid buffer\nin the temp buffers pool."
+   },
+   {
+    "point": "The fix adds the other-temp-relation check to the relation-extension path.",
+    "quote": "This commit fixes it by adding a RELATION_IS_OTHER_TEMP check in the\nrelation-extension path."
+   }
+  ],
+  "intro_commit": "ce146621f78"
+ },
+ {
+  "id": "B3-10",
+  "subsystem": 8,
+  "commit": "6a6e99f859d",
+  "date": "2026-08-03",
+  "type": "RISK",
+  "question": "Online enabling of data checksums runs a launcher that starts one worker per database. When a worker fails on a database, the launcher needs to tell a benign concurrent DROP DATABASE from a real failure. A change improved this detection so that a database that is only partially dropped (present but marked invalid) is treated as no longer existing.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/commands/dbcommands.c",
+   "src/backend/postmaster/datachecksum_state.c"
+  ],
+  "key_points": [
+   {
+    "point": "An interrupted DROP DATABASE marks the database invalid first and removes the row and files later, so a crash or error leaves an invalid row whose files remain on disk.",
+    "quote": "An interrupted DROP DATABASE flush the invalid\nmarker before the row and files are removed, so a crash or ERROR can\nleave an invalid row whose files remain on disk."
+   },
+   {
+    "point": "Treating such a database as nonexistent lets the launcher skip it, so checksums could be declared enabled although those files were never processed.",
+    "quote": "ensure that checksums cannot be enabled if there are invalid databases."
+   },
+   {
+    "point": "The fix reports a database as existing whenever its catalog row is found, so enabling aborts until the invalid database is dropped.",
+    "quote": "Report a database as existing whenever its catalog row is found to"
+   }
+  ],
+  "intro_commit": "1df361e3d82"
+ },
+ {
+  "id": "B3-11",
+  "subsystem": 8,
+  "commit": "112c2683807",
+  "date": "2026-08-06",
+  "type": "ALT",
+  "question": "VACUUM has a wraparound failsafe mode that exists to reclaim transaction IDs as quickly as possible. When it triggers, VACUUM stops using its small buffer access strategy ring so the rest of the run can use all of shared buffers. Later, the first heap pass was converted to use streaming reads, and the failsafe silently stopped having any effect on reads issued by that pass, because the stream keeps its own references to the strategy. The fix makes the stream drop the strategy too. Two side effects are accepted: some in-flight read I/O may be attributed to the wrong I/O context in pg_stat_io, and the stream's limit on pinned buffers stays lower than it would have been had no strategy ever been used.\nAn obvious alternative to avoid the second side effect would be to recreate the stream with a larger pin limit when the failsafe triggers. Why was this not chosen?\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.",
+  "key_files": [
+   "src/backend/access/heap/vacuumlazy.c",
+   "src/backend/storage/aio/read_stream.c",
+   "src/include/storage/read_stream.h"
+  ],
+  "key_points": [
+   {
+    "point": "Rebuilding with a larger pin limit would need a new, larger ring, which in turn would require draining all in-progress I/Os first.",
+    "quote": "larger ring, which would require first waiting for all in-progress IOs\n  to complete. That didn't seem worth it."
+   },
+   {
+    "point": "The failsafe is rarely reached, so the complexity is not justified for either accepted imperfection.",
+    "quote": "Two things we accept rather than fix, as neither is worth the added\ncomplexity given how rarely failsafe mode is reached:"
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B3-12",
+  "subsystem": 8,
+  "commit": "953c6dabdb5",
+  "date": "2026-11-05",
+  "type": "WHY",
+  "question": "With io_method=io_uring and restart_after_crash enabled, a backend crash makes the postmaster reinitialize shared memory and create new io_uring instances for asynchronous I/O. After repeated crash restarts, creating the new instances starts failing with errors such as \"Too many open files\" or \"Cannot allocate memory\", and the server can no longer restart. The old instances are no longer used but their resources are never released.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/storage/aio/method_io_uring.c"
+  ],
+  "key_points": [
+   {
+    "point": "The postmaster created new ring instances on each reinitialization without releasing its references to the old ones, so resources accumulated per crash restart.",
+    "quote": "reinitializes shared memory after a backend crash. It created new\nio_uring instances without releasing its references to the old ones,"
+   },
+   {
+    "point": "The fix registers a shared-memory-exit callback that releases the postmaster's references during shared memory cleanup, before new instances are created.",
+    "quote": "Fix this by registering an on_shmem_exit() callback to release the\npostmaster's references to the io_uring instances during shared\nmemory cleanup, before creating new ones."
+   }
+  ],
+  "intro_commit": null
+ }
+]

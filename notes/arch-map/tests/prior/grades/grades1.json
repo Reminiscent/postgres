@@ -1,0 +1,919 @@
+{
+ "I1.R1": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R2": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R3": {
+  "P": {
+   "scores": [
+    1,
+    0
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    0
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    0
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R4": {
+  "P": {
+   "scores": [
+    0.5,
+    1,
+    0
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    0.5,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R5": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    0.5
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R6": {
+  "P": {
+   "scores": [
+    1,
+    0
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    0
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    0
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R7": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R8": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    0.5
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R9": {
+  "P": {
+   "scores": [
+    1,
+    0.5
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    0.5
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    0.5
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R10": {
+  "P": {
+   "scores": [
+    0.5,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    0.5,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R11": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    0
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R12": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    0,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R13": {
+  "P": {
+   "scores": [
+    0.5,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    0.5,
+    0.5,
+    0
+   ],
+   "opposite": true
+  }
+ },
+ "I1.R14": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R15": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R16": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R17": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    0
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    0.5,
+    0
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    0
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R18": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R19": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    0.5
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R20": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R21": {
+  "P": {
+   "scores": [
+    1,
+    0,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    0,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    0,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R22": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    0,
+    0.5,
+    0
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    0.5,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R23": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    0.5
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    0.5,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R24": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I1.R25": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R1": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    0.5,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R2": {
+  "P": {
+   "scores": [
+    1,
+    0.5,
+    0.5
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    0.5
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R3": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    0.5,
+    0.5,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    0.5,
+    0.5,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R4": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    0.5,
+    0
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R5": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    0
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    0
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R6": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R7": {
+  "P": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R8": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R9": {
+  "P": {
+   "scores": [
+    1,
+    0.5,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    0.5,
+    0.5
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    0.5,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R10": {
+  "P": {
+   "scores": [
+    1,
+    0,
+    0
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    0
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    0,
+    0
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R11": {
+  "P": {
+   "scores": [
+    0.5,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ },
+ "I8.R12": {
+  "P": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "Q": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  },
+  "R": {
+   "scores": [
+    1,
+    1
+   ],
+   "opposite": false
+  }
+ }
+}

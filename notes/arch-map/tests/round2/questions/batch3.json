@@ -1,0 +1,252 @@
+[
+ {
+  "id": "R3-01",
+  "subsystem": 6,
+  "commit": "a13cdbd3d8b",
+  "date": "2026-08-19",
+  "type": "RISK",
+  "question": "An earlier change fixed a deadlock between GIN VACUUM and concurrent inserters when deleting pages from a GIN posting tree. It made VACUUM lock the whole posting tree (a cleanup lock on the root) before deleting any page, but only when there are pages to delete; the vacuum code that scans posting-tree leaves first examines pages under a shared buffer lock and, on finding a leaf, trades it for an exclusive lock to modify it. That trade is not atomic: there is a window where no lock on the page is held. (a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. (b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/gin/ginvacuum.c"
+  ],
+  "key_points": [
+   {
+    "point": "After swapping the shared buffer lock for an exclusive one, VACUUM did not re-check that a page it believed to be a leaf root is still a leaf.",
+    "quote": "It neglected to re-verify whether a\npage that was initially a leaf root page became an internal page due to\na concurrent root page split (during the window when no lock was held)."
+   },
+   {
+    "point": "An internal page could be treated as a leaf, so dead TIDs are missed and dangling references remain in the index (data corruption).",
+    "quote": "It was therefore possible for GIN VACUUM to spuriously treat an internal\npage as a leaf page, leading to data corruption."
+   },
+   {
+    "point": "Fix re-verifies leaf status after taking the exclusive lock, and if the page is no longer a leaf, drops it and takes a shared lock so the non-leaf root is processed normally.",
+    "quote": "If it isn't, drop our exclusive lock and\nacquire a shared lock so that the non-leaf root page gets processed in\nthe usual way."
+   }
+  ],
+  "intro_commit": "fd83c83d0943",
+  "family": "I3",
+  "family_reason": "A buffer lock upgrade window lets a concurrent root split invalidate the page-type assumption, a lock/race ordering error."
+ },
+ {
+  "id": "R3-02",
+  "subsystem": 6,
+  "commit": "8637383f5ff",
+  "date": "2026-08-19",
+  "type": "RISK",
+  "question": "A GIN fix made pending-list cleanup safe against concurrent cleaners: previously a cleanup that saw another process cleaning could exit early, and VACUUM could then miss tuples that it needed to delete. The fix serialized cleanup of the pending list with a lock and made VACUUM wait for it, and also let automatic maintenance stop at the tail of the list as of the start of cleanup rather than chase concurrent inserts. The cleanup is required because tuples recently inserted into the pending list can contain row pointers that VACUUM already considers dead. (a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. (b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/gin/ginfast.c",
+   "src/backend/access/gin/ginvacuum.c",
+   "src/include/access/gin_private.h"
+  ],
+  "key_points": [
+   {
+    "point": "The bulk-delete routine does pending-list cleanup only on its first call, not on later calls.",
+    "quote": "However, ginbulkdelete neglected to perform pending list cleanup on\nVACUUM's second or subsequent call."
+   },
+   {
+    "point": "A VACUUM needing multiple rounds of index vacuuming can leave dangling TID references to dead heap tuples in the index, violating the requirement that index vacuuming remove all dead TIDs.",
+    "quote": "It was therefore possible for a\nVACUUM that requires multiple rounds of index vacuuming to leave behind\ndangling references."
+   },
+   {
+    "point": "Fix performs pending list cleanup on every bulk-delete call, and comments clarify why not fully emptying the list is safe.",
+    "quote": "To fix, teach ginbulkdelete to perform pending list cleanup during every\ncall."
+   }
+  ],
+  "intro_commit": "e2c79e14d998",
+  "family": "I2",
+  "family_reason": "Dead TIDs survive index vacuuming so index entries may point at removed or reused heap tuples, a VACUUM correctness/visibility horizon violation."
+ },
+ {
+  "id": "R3-03",
+  "subsystem": 6,
+  "commit": "cc053b6e127",
+  "date": "2026-09-28",
+  "type": "RISK",
+  "question": "A recent feature let autovacuum workers use parallel workers for index vacuuming and cleanup, controlled by a new GUC and a per-table storage parameter. To handle a SIGHUP changing cost-based delay settings mid-operation, the leader stores its effective cost parameters in dynamic shared memory, and parallel workers poll for updates. Setup of this sharing happens when the parallel context is created and registers a cleanup callback to run when the shared memory segment is detached. (a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. (b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/commands/vacuumparallel.c"
+  ],
+  "key_points": [
+   {
+    "point": "When no DSM segment can be created, the parallel context exists with zero workers and a NULL segment pointer; the original code registered a detach callback on that NULL pointer.",
+    "quote": "If no DSM segment can be created, a ParallelContext can still be\ncreated with zero workers, but its seg pointer is NULL. Parallel\nautovacuum registered a segment detach callback on that NULL pointer,"
+   },
+   {
+    "point": "The result is a crash of the autovacuum worker, a robustness failure when resources (shared memory) are exhausted.",
+    "quote": "crashing the autovacuum worker."
+   },
+   {
+    "point": "Fix sets up the shared cost parameters and the callback only when the context has workers, since there is nothing to propagate to otherwise.",
+    "quote": "Fix by setting up the shared cost parameters and the detach callback\nonly when the parallel context has workers, as there are no workers to\npropagate the parameters to otherwise."
+   }
+  ],
+  "intro_commit": "1ff3180ca016",
+  "family": "I5",
+  "family_reason": "Cleanup/detach callback set up on a resource (DSM segment) that may not exist, causing a crash on an allocation-failure path."
+ },
+ {
+  "id": "R3-04",
+  "subsystem": 7,
+  "commit": "79b101486c1",
+  "date": "2026-08-26",
+  "type": "RISK",
+  "question": "PostgreSQL once changed snapshot export and import so that the exporting session no longer needs an assigned transaction id: the export file records the virtual transaction id, which avoids serializing logical-slot creation and also makes it possible to export snapshots on hot-standby replicas. On a standby, a snapshot lists in-progress transactions differently from a primary: all running top-level and sub transaction ids are stored in the sub-transaction array, with the top-level array left empty, and the overflow flag does not mean what it means elsewhere. (a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. (b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/utils/time/snapmgr.c"
+  ],
+  "key_points": [
+   {
+    "point": "Export treated the sub-transaction array as redundant whenever the overflow flag was set, even for recovery snapshots where it holds all running XIDs.",
+    "quote": "Unlike\nwith other snapshots, its suboverflowed flag does not mean that subxip\nis redundant.  We nevertheless treated it that way during snapshot"
+   },
+   {
+    "point": "An importing session could see in-progress transactions as aborted, and hint bits could be wrongly set on the standby, so tuples appear wrongly visible/invisible even to other sessions.",
+    "quote": "so an importing session could see in-progress transactions as\naborted.  This misbehavior could also lead to hint bits being\nincorrectly set on the standby;"
+   },
+   {
+    "point": "Fix exports the sub-transaction array regardless of overflow for snapshots taken during recovery, matching the existing copy and serialize paths.",
+    "quote": "To fix, teach snapshot export to include the subxip[] array regardless\nof the overflow flag when the snapshot is taken during recovery."
+   }
+  ],
+  "intro_commit": "6c2003f8a1bb",
+  "family": "I2",
+  "family_reason": "Exported standby snapshot loses in-progress XIDs, breaking snapshot visibility and hint-bit correctness."
+ },
+ {
+  "id": "R3-05",
+  "subsystem": 7,
+  "commit": "0ebeec35fc3",
+  "date": "2026-08-20",
+  "type": "WHY",
+  "question": "Importing an exported snapshot (SET TRANSACTION SNAPSHOT) must verify that the exporting transaction is still running and then make the importing backend advertise the snapshot's xmin so that cleanup cannot remove rows the snapshot still needs. In rare interleavings a concurrent VACUUM computing its oldest-xmin horizon fails to see the xmin in either the source backend or the importing backend, and may remove deleted tuples that are still visible to the imported snapshot. (a) Which source files under src/backend does the fix modify? List up to 5, most likely first. (b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/storage/ipc/procarray.c"
+  ],
+  "key_points": [
+   {
+    "point": "The check that the source is still running and the installation of the imported xmin must be atomic with respect to horizon computation.",
+    "quote": "ProcArrayInstallImportedXmin verifies that the source transaction (the\ntransaction whose snapshot we're importing) is still running, and then\ninstalls the caller's imported xmin.  These steps have to be atomic."
+   },
+   {
+    "point": "Without it VACUUM may prune tuples still visible to the imported snapshot.",
+    "quote": "This\ncould result in VACUUM pruning away deleted tuples that were still\nvisible to the imported snapshot."
+   },
+   {
+    "point": "Fix takes the process-array lock in exclusive mode during import so one of the two procs always advertises an xmin holding the horizon back.",
+    "quote": "take ProcArrayLock in exclusive mode while importing an exported\nsnapshot's xmin within ProcArrayInstallImportedXmin.  That guarantees"
+   }
+  ],
+  "intro_commit": null,
+  "family": "I2",
+  "family_reason": "Missing atomicity lets the xmin horizon advance past an imported snapshot, so pruning removes still-visible tuples."
+ },
+ {
+  "id": "R3-06",
+  "subsystem": 7,
+  "commit": "a5ccf20801c",
+  "date": "2026-10-26",
+  "type": "WHY",
+  "question": "At each checkpoint, the server persists the state of prepared transactions (PREPARE TRANSACTION) in per-transaction files. If the server crashes in the middle of writing one of these files, or a base backup copies the file at that moment, the file is left empty or truncated. The next startup then fails, typically with an 'incorrect size of file' error, so the cluster cannot be brought up even though the data is otherwise fine. (a) Which source files under src/backend does the fix modify? List up to 5, most likely first. (b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/access/transam/twophase.c"
+  ],
+  "key_points": [
+   {
+    "point": "The old code rewrote each state file in place with truncation, so a crash or concurrent copy could observe a partial file.",
+    "quote": "CheckPointTwoPhase() wrote each 2PC file in place, with O_TRUNC.  A\ncrash mid-write, or a base backup copying the file at that point left an\nempty or partial file that would make startup fail,"
+   },
+   {
+    "point": "Fix writes to a temporary file and renames it into place, relying on rename atomicity so readers see either old or complete new content.",
+    "quote": "The 2PC files are now written through a temporary file that gets renamed\nat the end, relying on the atomicity of the rename to make startup safe,\nbe it after a crash or a base backup."
+   }
+  ],
+  "intro_commit": null,
+  "family": "I1",
+  "family_reason": "Non-atomic in-place file rewrite at checkpoint makes crash/base backup leave an unusable durable state."
+ },
+ {
+  "id": "R3-07",
+  "subsystem": 8,
+  "commit": "97a18c221b8",
+  "date": "2026-07-10",
+  "type": "WHY",
+  "question": "When data checksums are enabled online, a launcher process hands databases to worker processes one at a time; the first worker is given the job of processing the shared catalogs, and later workers skip them. Two problems were found. First, if that first worker's database is dropped after it was selected but before processing starts, the worker fails, yet the shared catalogs were already recorded as done, so the whole operation can finish successfully while shared catalogs never got checksums. Second, the launcher waits for sessions owning temporary relations, and it waited even for a session that merely owned a temporary view. (a) Which source files under src/backend does the fix modify? List up to 5, most likely first. (b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/postmaster/datachecksum_state.c"
+  ],
+  "key_points": [
+   {
+    "point": "Shared catalogs must be marked processed only after the worker that was assigned them completes successfully.",
+    "quote": "This commit fixes the issue by marking shared catalogs as processed\nonly after a worker completes successfully."
+   },
+   {
+    "point": "Otherwise later workers skip them and checksum enabling completes although the shared catalogs were never processed.",
+    "quote": "As a result, later workers skipped them, and\nchecksum enabling could complete successfully even though the shared\ncatalogs had never been processed."
+   },
+   {
+    "point": "Temporary relations to wait for are restricted to those with storage, as for ordinary relations.",
+    "quote": "This commit fixes the issue by filtering temporary relations with storage\nonly, matching the existing behavior for non-temporary relations."
+   }
+  ],
+  "intro_commit": null,
+  "family": "I1",
+  "family_reason": "Checksum state is declared complete although some on-disk pages never got checksums."
+ },
+ {
+  "id": "R3-08",
+  "subsystem": 8,
+  "commit": "cffb4d8bd65",
+  "date": "2026-09-14",
+  "type": "WHY",
+  "question": "Online data checksum enabling runs a single launcher background process whose 'running' status is kept in shared memory, and an abort can be requested by the user. Two race conditions were found around shutdown: a second launcher could be started while the first was still running its exit handling, and a sequence of 'start, abort, start' could be mishandled if the second start was issued before the abort had finished completing. (a) Which source files under src/backend does the fix modify? List up to 5, most likely first. (b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/postmaster/datachecksum_state.c"
+  ],
+  "key_points": [
+   {
+    "point": "The running flag was cleared too early during shutdown, leaving a window for a duplicate launcher; fix only clears it in the exit handler when this process had set it.",
+    "quote": "The launcher_running flag was reset to false during shutdown, which\nleft a small window where a new launcher could be started when the\nexit handler was still running."
+   },
+   {
+    "point": "The aborted state is also reset when the requested operation changes during shutdown so a quick restart works.",
+    "quote": "Also reset the aborted state if the launch_operation changes during\nshutdown to allow scenarios like \"start -> abort -> start\" to work"
+   }
+  ],
+  "intro_commit": null,
+  "family": "I7",
+  "family_reason": "Singleton background process lifecycle race between exit handling and a new launch."
+ },
+ {
+  "id": "R3-09",
+  "subsystem": 8,
+  "commit": "b52a1c2c8a6",
+  "date": "2026-09-14",
+  "type": "WHY",
+  "question": "Data checksums can be changed offline with the pg_checksums tool, which affects only the node it is run on. On replicas, WAL replay of checkpoint records unconditionally adopted the data checksum state carried in the checkpoint. Consequently, if checksums were enabled offline on only the primary, a standby started verifying checksums that its pages do not have, and if they were changed offline on a standby, the next replayed checkpoint silently reverted that state. A base backup restored on a node is a special case because its control file was copied at an arbitrary moment. (a) Which source files under src/backend does the fix modify? List up to 5, most likely first. (b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/access/transam/xlog.c",
+   "src/backend/postmaster/datachecksum_state.c",
+   "src/backend/utils/activity/wait_event_names.txt",
+   "src/include/catalog/pg_control.h",
+   "src/include/storage/lwlocklist.h"
+  ],
+  "key_points": [
+   {
+    "point": "Replay no longer adopts the replayed state; the control file tracks only this node's state and replay cross-checks against it, warning on divergence.",
+    "quote": "To fix, make the control file track this node's state alone, and have\nreplay cross-check the replayed state against it instead of adopting\nit, warning once per divergent value and reporting when the states"
+   },
+   {
+    "point": "Control file gains a watermark LSN and a flag marking that pg_checksums wrote the state, and recovery must never overwrite it with a replayed state.",
+    "quote": "pg_control gains a watermark, normally the end LSN of\nthe newest XLOG2_CHECKSUMS record the node has written or applied,\nand a flag marking that the state was last written by pg_checksums."
+   },
+   {
+    "point": "This is an on-disk format change requiring a control-file version bump.",
+    "quote": "This requires\na PG_CONTROL_VERSION bump."
+   }
+  ],
+  "intro_commit": null,
+  "family": "I8",
+  "family_reason": "Local-only on-disk checksum state is overwritten by replayed WAL from another node and the control file format changes."
+ }
+]

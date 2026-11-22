@@ -1,0 +1,232 @@
+[
+ {
+  "id": "R4-01",
+  "subsystem": 9,
+  "commit": "6873a138f78",
+  "date": "2026-10-10",
+  "type": "RISK",
+  "question": "A recent change converted all remaining built-in subsystems to a new shared-memory allocation API. Its stated goal was to remove every remaining direct use of the older routines that create or attach to named shared structures and shared hash tables in built-in code. After this conversion, subsystems set up their shared state through registered callbacks instead. Consider a build where each server child process is started by re-executing the server binary (the EXEC_BACKEND model, as on Windows) and the debugging GUC wal_debug is turned on.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/transam/xlog.c",
+   "src/backend/access/transam/xloginsert.c",
+   "src/include/access/xlog.h"
+  ],
+  "key_points": [
+   {
+    "point": "A memory context used only for wal_debug tracing was created in an initialization callback that now runs only in the postmaster or a standalone backend.",
+    "quote": "Converting xlog.c to the new shared memory allocation API left the\ncreation of the memory context used by wal_debug in the\nXLOGShmemInit() callback, which now only runs in the postmaster or in"
+   },
+   {
+    "point": "In EXEC_BACKEND children the context pointer stayed uninitialized, so the first WAL insertion with wal_debug crashed the backend.",
+    "quote": "As a result, walDebugCtx was left uninitialized in child processes in\nEXEC_BACKEND mode, and with wal_debug turned on, the backend crashed\non first WAL insertion."
+   }
+  ],
+  "intro_commit": "9b5acad3f40f",
+  "family": "I5",
+  "family_reason": "The failure is a per-process resource (a memory context) left uninitialized in child processes after initialization moved to a postmaster-only callback."
+ },
+ {
+  "id": "R4-02",
+  "subsystem": 9,
+  "commit": "6c44473c2de",
+  "date": "2026-09-14",
+  "type": "RISK",
+  "question": "A new utility command was added for use on a standby: it blocks until a specified WAL location has been replayed, so that a user who made changes on the primary can be sure they are visible on the standby. The command must block without holding any snapshot, because a held snapshot could block replay of WAL records and cause a kind of self-deadlock. For this reason it was made a separate utility command rather than a function or stored procedure. It later gained an optional timeout setting given in milliseconds.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/transam/xlogwait.c",
+   "src/backend/commands/repack_worker.c",
+   "src/backend/commands/wait.c",
+   "src/include/access/xlogwait.h"
+  ],
+  "key_points": [
+   {
+    "point": "The timeout option accepted values up to the largest 64-bit integer, but converting milliseconds to a microsecond deadline overflowed int64.",
+    "quote": "Commit 447aae13b03 accepted TIMEOUT values up to INT64_MAX\nmilliseconds, but computing the deadline multiplies by 1000, which\ncaused an int64 overflow."
+   },
+   {
+    "point": "The overflow made the command report a timeout immediately instead of waiting for the requested time.",
+    "quote": "caused an int64 overflow. And the command reported a timeout at once\ninstead of waiting."
+   }
+  ],
+  "intro_commit": "447aae13b03",
+  "family": "I6",
+  "family_reason": "A numeric overflow in deadline computation changes the command's observable semantics (immediate timeout instead of waiting)."
+ },
+ {
+  "id": "R4-03",
+  "subsystem": 9,
+  "commit": "d903620acf6",
+  "date": "2026-11-02",
+  "type": "WHY",
+  "question": "An incremental backup is taken after a relation has been truncated and then extended again. When it is combined with an earlier backup at restore time, live rows disappear and deleted rows reappear, because some blocks that were modified after the truncation are missing from the incremental backup. The block-modification information used to decide which blocks to include comes from WAL summary files that cover successive LSN ranges, and records of truncations act as limits on which earlier block references remain valid. The bug is in how the summaries covering the backup's range are combined.\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/backup/basebackup_incremental.c"
+  ],
+  "key_points": [
+   {
+    "point": "Summaries were merged in an arbitrary order, so an older summary's truncation limit could be applied after newer summaries had already recorded block modifications, discarding them.",
+    "quote": "WAL summaries were merged without ensuring LSN order. Applying a limit\nblock from an older summary after processing a newer summary could\ndiscard references to blocks modified later, causing those blocks to"
+   },
+   {
+    "point": "The fix sorts the required summaries by ascending start LSN before merging so later block modifications are preserved.",
+    "quote": "Sort the required summaries by ascending start LSN before merging them,\npreserving references to later block modifications so that the required"
+   }
+  ],
+  "intro_commit": null,
+  "family": "I1",
+  "family_reason": "Incremental backup omits modified blocks so the restored data silently loses committed changes."
+ },
+ {
+  "id": "R4-04",
+  "subsystem": 10,
+  "commit": "782d9cf8bf8",
+  "date": "2026-11-03",
+  "type": "RISK",
+  "question": "A change optimized how replication senders are woken up. Previously a loop over all sender slots took a spinlock for each slot on every wakeup, which became costly once logical decoding on standbys required waking logical senders after every applied WAL record. The change made each sender add itself to a shared condition variable's waiter list without actually sleeping on that variable, and wakers broadcast on it, which sets the senders' latches. Separate condition variables were used for physical and logical senders.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/replication/walsender.c"
+  ],
+  "key_points": [
+   {
+    "point": "Broadcast notifies only senders already on the waiter list, but the sender checks for flushed WAL before joining the list, so a flush in between is missed.",
+    "quote": "which notify only senders already on the waitlist.\nHowever, XLogSendPhysical() checks the flush position before\nWalSndWait() joins the waitlist. If WAL is flushed between these two"
+   },
+   {
+    "point": "The sender then sleeps despite pending WAL, delaying replication and synchronous commits until the next periodic standby status report.",
+    "quote": "be sent, delaying replication and synchronous commits until another\nevent woke them. In the reported case, commits stalled for about ten\nseconds, until the standby sent its next periodic status report."
+   }
+  ],
+  "intro_commit": "bc971f4025c",
+  "family": "I3",
+  "family_reason": "A check-then-sleep race: a wakeup issued between checking for work and registering as a waiter is lost."
+ },
+ {
+  "id": "R4-05",
+  "subsystem": 10,
+  "commit": "fc1900915b1",
+  "date": "2026-11-05",
+  "type": "RISK",
+  "question": "A change allowed the two_phase option of a subscription to be altered. Because the option is controlled by both the publisher (as a slot option) and the subscriber, the slot option must also be modified. Turning it from true to false is permitted only when there are no pending prepared transactions for the subscription, since otherwise their changes could be replicated again along with the commit, giving duplicate data or errors. Turning it from false to true is allowed only after initial data synchronization is complete, so it is performed later by the logical replication worker.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/commands/subscriptioncmds.c"
+  ],
+  "key_points": [
+   {
+    "point": "ALTER SUBSCRIPTION SET (two_phase = true) always moved the state to pending even when it was already enabled, though the publisher slot still had two_phase on and prepared transactions could exist.",
+    "quote": "ALTER SUBSCRIPTION ... SET (two_phase = true) always moved the\nsubscription's two_phase state to pending, even if two_phase was already\nenabled."
+   },
+   {
+    "point": "A later SET (two_phase = false) skipped the prepared-transaction check, so commits were re-sent as regular transactions, causing self-deadlocks, duplicate data or orphaned prepared transactions.",
+    "quote": "transactions and disabled two_phase anyway. When those transactions were\ncommitted on the publisher, their changes were re-sent as regular\ntransactions instead of COMMIT PREPARED, leading to self-deadlocks,"
+   },
+   {
+    "point": "REFRESH PUBLICATION with copy_data = true was wrongly allowed, which could stream prepared transactions during initial sync and apply them as empty prepares.",
+    "quote": "This\ncould stream prepared transactions during the initial sync of newly added\ntables and apply them as empty prepares."
+   }
+  ],
+  "intro_commit": "1462aad2e44",
+  "family": "I6",
+  "family_reason": "Resetting the two_phase state to pending when already enabled breaks later checks that rely on the enabled state, causing duplicated or orphaned prepared-transaction data."
+ },
+ {
+  "id": "R4-06",
+  "subsystem": 10,
+  "commit": "aa4c52b808f",
+  "date": "2026-08-18",
+  "type": "RISK",
+  "question": "A change taught logical decoding to skip transactions already known to be aborted. Before, aborts were detected concurrently only during catalog scans while replaying a transaction in streaming mode. The change added a transaction-status lookup (commit log) so that changes can also be skipped when the transaction does not touch system catalogs. To avoid slowing small transactions, which mostly commit, the lookup is done only for large transactions before they are evicted from memory, avoiding unnecessary disk or network I/O for large rolled-back transactions.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/replication/logical/reorderbuffer.c"
+  ],
+  "key_points": [
+   {
+    "point": "The discard path reused the truncation routine that marks subtransactions with in-memory changes as streamed, although nothing was streamed and the top-level transaction was never marked.",
+    "quote": "That path reuses ReorderBufferTruncateTXN(), which marks\nevery subtransaction that still has in-memory changes as\nstreamed."
+   },
+   {
+    "point": "When the abort record is decoded, the stream abort callback fires for a subtransaction the plugin never saw: pgoutput sends an unparseable message to a non-streaming subscriber.",
+    "quote": "For pgoutput this sends a Stream Abort ('A') message to a subscriber\nthat requested streaming = off, and it does so regardless of the\nnegotiated protocol version, so even a client speaking a version that"
+   },
+   {
+    "point": "test_decoding dereferences a NULL pointer and crashes because its per-transaction state is never allocated for a transaction discarded as aborted.",
+    "quote": "parse. test_decoding dereferences a NULL pointer and crashes, since it\nallocates its per-transaction state in the begin or stream start"
+   }
+  ],
+  "intro_commit": "072ee847ad4",
+  "family": "I5",
+  "family_reason": "A subtransaction is wrongly flagged as streamed, so a later abort invokes the streaming abort callback with missing per-transaction state or sends an unparseable message."
+ },
+ {
+  "id": "R4-07",
+  "subsystem": 11,
+  "commit": "dd97e0c8e38",
+  "date": "2026-10-06",
+  "type": "RISK",
+  "question": "A feature allowed NOT NULL constraints to be added as NOT VALID, so they can be added without scanning the table and validated later without holding an access exclusive lock once violating rows are fixed. As part of it, pg_attribute.attnotnull became only an indicator that a not-null constraint exists, with validity recorded in pg_constraint, and an internal per-column nullability state was cached in tuple descriptors. SET NOT NULL on a column with an invalid constraint validates it.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/commands/tablecmds.c"
+  ],
+  "key_points": [
+   {
+    "point": "A single ALTER TABLE that drops a NOT NULL column, adds a same-named column and makes it a primary key checked for an existing NOT NULL constraint before the drop ran.",
+    "quote": "This happened\nbecause ALTER TABLE checked for an existing NOT NULL constraint before\ndropping the old column."
+   },
+   {
+    "point": "Finding the old column's constraint made it skip adding one for the new column, though the old constraint disappears with the old column, so the command failed with a 'not marked NOT NULL' error.",
+    "quote": "Finding the constraint caused it to skip adding\none for the new column, even though the old constraint would be removed\nwith the old column."
+   }
+  ],
+  "intro_commit": "a379061a22a",
+  "family": "I6",
+  "family_reason": "Checking for an existing NOT NULL constraint before column drops are executed examines the old column, so the new primary-key column gets no NOT NULL constraint and the command fails."
+ },
+ {
+  "id": "R4-08",
+  "subsystem": 11,
+  "commit": "b48caa7dfde",
+  "date": "2026-08-03",
+  "type": "RISK",
+  "question": "A change ensured that the grantor recorded for a role membership grant (GRANT foo TO bar GRANTED BY baz) is always a valid role. Role grants now depend on the grantor, which cannot be dropped without removing the grant or changing the grantor; DROP OWNED BY removes such grants while REASSIGN OWNED BY does not. The membership catalog gained an OID column so that dependencies can work, plus an index on the grantor column so that dropping a role does not need a sequential scan.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/catalog/dependency.c"
+  ],
+  "key_points": [
+   {
+    "point": "The change added a case for the role-membership catalog when taking a lock on an object about to be deleted, but not when releasing it.",
+    "quote": "Commit 6566133c5f5 added a case for AuthMemRelationId in\nAcquireDeletionLock(), but not ReleaseDeletionLock()."
+   },
+   {
+    "point": "The release path fell through to a generic database-object unlock, raising a WARNING and leaving the lock held until end of transaction.",
+    "quote": "The fall-through\ncase would go to UnlockDatabaseObject(), which would raise a WARNING;\nand the lock would be retained until the end of the transaction."
+   }
+  ],
+  "intro_commit": "6566133c5f5",
+  "family": "I3",
+  "family_reason": "Acquire and release of deletion locks are asymmetric for the new object class, so a lock is retained to transaction end and a spurious warning is raised."
+ },
+ {
+  "id": "R4-09",
+  "subsystem": 11,
+  "commit": "479a931155c",
+  "date": "2026-09-11",
+  "type": "RISK",
+  "question": "A feature extended CREATE PUBLICATION ... FOR ALL TABLES with an EXCEPT TABLE clause so that one or more tables can be excluded and the publisher does not send their data. A flag was added to the publication-to-relation catalog to mark excluded relations. For partitioned tables the exclusion is applied at the root level: naming a root table excludes all its current and future partitions. ALTER PUBLICATION support for managing exclusions was left to follow-up work.\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/catalog/pg_publication.c",
+   "src/backend/utils/cache/relcache.c"
+  ],
+  "key_points": [
+   {
+    "point": "A partition left detach-pending after an interrupted DETACH CONCURRENTLY still has relispartition set but reports no ancestors, which the publication-descriptor builder did not expect.",
+    "quote": "pg_class still says\nrelispartition while get_partition_ancestors() already reports nothing,\nwhich RelationBuildPublicationDesc() was not ready for."
+   },
+   {
+    "point": "It took relispartition to mean a non-empty ancestor list and asked for its last element: an assertion failure or NULL dereference, hit by a plain UPDATE or DELETE even with no publication.",
+    "quote": "It took\nrelispartition to mean that the ancestor list is not empty and asked for\nits last element, which is an assertion failure, or a NULL pointer"
+   }
+  ],
+  "intro_commit": "fd366065e06a",
+  "family": "I6",
+  "family_reason": "Code assumed relispartition implies a non-empty ancestor list, which is false for a partition left detach-pending, giving an assertion failure or NULL dereference."
+ }
+]

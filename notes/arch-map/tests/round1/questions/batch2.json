@@ -1,0 +1,317 @@
+[
+ {
+  "id": "B2-01",
+  "subsystem": 3,
+  "commit": "b6dae498dfa",
+  "date": "2026-10-22",
+  "type": "RISK",
+  "question": "A recent change to how CREATE SCHEMA processes its embedded element commands (CREATE TABLE, CREATE VIEW, CREATE INDEX and so on) was meant to stop re-ordering those subcommands and instead execute them in the order given. Along the way it passed down a parse state for error cursors and stopped modifying the parse tree it was handed. As part of that cleanup, the new schema's name was no longer filled into the unqualified object names appearing in the elements, and a later partial revert of related work kept that behaviour.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/parser/parse_utilcmd.c"
+  ],
+  "key_points": [
+   {
+    "point": "Names that must refer to existing objects in the new schema were no longer pinned to it, so they were searched via the search path and could resolve to pg_temp or pg_catalog.",
+    "quote": "it allows\nnames that will be looked up rather than created to be resolved in\npg_temp or pg_catalog, which they should not be."
+   },
+   {
+    "point": "Example: a CREATE INDEX inside CREATE SCHEMA could attach to a same-named table in pg_temp rather than the table in the new schema.",
+    "quote": "This for example\nallowed a CREATE INDEX to target a chance-match table name in pg_temp\nrather than the expected table in the new schema."
+   },
+   {
+    "point": "Fix restores the old approach of writing the new schema name into each unqualified name, keeping the RangeVar-based refactoring.",
+    "quote": "Revert to the old\napproach of putting the new schema's name into each RangeVar."
+   }
+  ],
+  "intro_commit": "a9c350d9ee6"
+ },
+ {
+  "id": "B2-02",
+  "subsystem": 3,
+  "commit": "e405a46c45b",
+  "date": "2026-11-06",
+  "type": "RISK",
+  "question": "JSON_TABLE() was added as a table function that turns JSON data into a relational view usable in FROM, like XMLTABLE(). A row pattern jsonpath selects JSON items, and column values are computed with the SQL/JSON query functions. The context item and PASSING arguments are parsed and analyzed into a JSON expression stored in the table function node, and the PASSING values are also copied out separately for the executor.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/parser/parse_jsontable.c"
+  ],
+  "key_points": [
+   {
+    "point": "Collations were never assigned to the transformed context item and PASSING expressions, so they were left without collation information.",
+    "quote": "As a result, expressions in there were left without collations."
+   },
+   {
+    "point": "Text comparisons failed with a could-not-determine-collation error even with COLLATE; row comparisons got an empty collation list so the executor compared zero columns and gave wrong results (or tripped an assertion).",
+    "quote": "A text\ncomparison failed with \"could not determine which collation to use for\nstring comparison\", even with an explicit COLLATE clause"
+   },
+   {
+    "point": "Row comparison such as ROW(1,2) < ROW(3,4) returned false.",
+    "quote": "equal rows (so\nROW(1, 2) < ROW(3, 4) yielded false)"
+   }
+  ],
+  "intro_commit": "de3600452b6"
+ },
+ {
+  "id": "B2-03",
+  "subsystem": 3,
+  "commit": "181b6185c79",
+  "date": "2026-07-01",
+  "type": "ALT",
+  "question": "When a user creates an index without naming it, PostgreSQL generates the name from the names of the index columns. For plain columns that is the column name, but for expression index columns the current rule is equivalent to the heuristics used for naming SELECT output columns, falling back to a generic placeholder in the many cases those heuristics give up. Generated names for expression indexes therefore frequently collide, which is handled but confuses users, and concurrent index creations may race to use the same name. A proposal is to produce more informative names for expression indexes, built by walking the expression and joining pieces of it with underscores.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) An obvious alternative would be to simply improve the existing heuristics used to name SELECT output columns and reuse them for index names. Why was that not chosen?",
+  "key_files": [
+   "src/backend/commands/indexcmds.c",
+   "src/backend/parser/parse_target.c",
+   "src/backend/parser/parse_utilcmd.c",
+   "src/include/nodes/parsenodes.h",
+   "src/include/parser/parse_target.h"
+  ],
+  "key_points": [
+   {
+    "point": "Changing the shared column-name heuristics would have a very large blast radius because it determines column headings applications see.",
+    "quote": "Messing with the FigureColname heuristics would have a very\nlarge blast radius, since that affects the column headings\nthat applications see."
+   },
+   {
+    "point": "Index names are rarely of direct concern to SQL queries, so index-name generation can be decoupled from the output-column heuristics and changed freely.",
+    "quote": "SQL queries are seldom directly concerned with index names.\nSo we should be able to change the index-name generation rules\nas long as we decouple them from FigureColname."
+   },
+   {
+    "point": "The new method digs through the expression and collects Var names, Const text (alphanumerics only) and function names, ignoring operator names to reduce the need for quoting.",
+    "quote": "extract the names of Vars, the string representations of Consts,\nand the names of functions, and run those together with underscores\nbetween."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B2-04",
+  "subsystem": 3,
+  "commit": "35b349a530c",
+  "date": "2026-10-29",
+  "type": "WHY",
+  "question": "A JSON_TABLE() query whose PASSING clause contains an argument with a sub-select (or certain other expression nodes such as a null test) fails at parse analysis with errors like \"unexpected non-SELECT command in SubLink\" or \"unrecognized node type\". The failure happens whenever the table has at least one column that is not FOR ORDINALITY; if all columns are FOR ORDINALITY the query works. The same PASSING argument expressions are evidently analyzed more than once.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/parser/parse_jsontable.c"
+  ],
+  "key_points": [
+   {
+    "point": "The raw PASSING list was fed to expression transformation both for the row pattern and again for each non-ordinality column, but transformation mutates some nodes in place (a sublink's raw subselect is replaced by the analyzed Query).",
+    "quote": "so the same raw expressions were run through\ntransformExpr() once for the row pattern and again for every such\ncolumn."
+   },
+   {
+    "point": "The fix gives each transformation its own copy of the raw PASSING arguments rather than sharing one list.",
+    "quote": "Fix by giving each transformation its own copy of the raw PASSING\narguments."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B2-05",
+  "subsystem": 4,
+  "commit": "55fa1b06780",
+  "date": "2026-09-04",
+  "type": "RISK",
+  "question": "The planner used to refuse certain join orders in which an expression evaluated at an outer join (a placeholder) overlapped one side of a proposed join without being contained in it. That restriction was removed because small join_collapse_limit or from_collapse_limit settings can prevent finding a join order that avoids the situation, and the case was instead made to work by evaluating the placeholder expression in the left-hand input of a nested loop. The change went into the development branch only.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/optimizer/path/joinrels.c"
+  ],
+  "key_points": [
+   {
+    "point": "Join legality checking did not consider lateral parameters that are outputs of an outer join (via placeholder variables), so it could approve a join that includes part of that outer join's input while the outer join can only be completed above it.",
+    "quote": "leaving the lateral parameter forever unsatisfiable."
+   },
+   {
+    "point": "Such a join only generates paths that can never appear in a complete plan; in assert builds it trips an assertion when building nestloop paths, and it wastes planning effort.",
+    "quote": "In assert-enabled builds this tripped the backstop Assert in\ntry_nestloop_path()."
+   },
+   {
+    "point": "The bogus legality can mislead the clauseless-join heuristics into skipping other join rels, leading to failure to find any plan at all.",
+    "quote": "thinking that legality of this join means that some other join rel\nneed not be formed, and that could lead to failure to find any plan at\nall."
+   }
+  ],
+  "intro_commit": "a16ef313f2c"
+ },
+ {
+  "id": "B2-06",
+  "subsystem": 4,
+  "commit": "8cdf3c9214f",
+  "date": "2026-11-11",
+  "type": "WHY",
+  "question": "A query joining on a parameterized nested-loop path with a Memoize node above the inner side can return wrong rows. The join uses a hashable operator that treats fewer values as equal than the type's default equality does; for example a byte-wise equality operator applied to a column with a case-insensitive nondeterministic collation. Two outer values that the join clause considers different, such as 'abc' and 'ABC', end up sharing a single cache entry, and the inner rows cached for one are returned for the other.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/optimizer/plan/initsplan.c"
+  ],
+  "key_points": [
+   {
+    "point": "Cache keys were compared using the type's default equality operator rather than the operator of the parameterized join clause.",
+    "quote": "Memoize compared cache keys with the type's default equality operator\nrather than the operator used by the parameterized join clause."
+   },
+   {
+    "point": "Fix takes the equality operators from the join clause's hash join operator: the join operator itself for same-type inputs, or a same-type member of its hash opfamily for cross-type operators.",
+    "quote": "When both inputs are of the same type,\nuse the join operator itself.  For cross-type operators, look up the\nsame-type equality members in the join operator's hash opfamily."
+   },
+   {
+    "point": "If no suitable same-type member exists, Memoize is simply not used for that clause; non-hashjoinable clauses keep the old behaviour with binary mode.",
+    "quote": "If\nno such member exists, don't set a hash equality operator, so Memoize\nisn't used for that clause."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B2-07",
+  "subsystem": 4,
+  "commit": "dca6a9e320e",
+  "date": "2026-09-29",
+  "type": "ALT",
+  "question": "Self-join elimination merges two scans of the same table in one query when it is provably safe. A security report showed it can merge two range-table entries for the same table that carry different row-level security quals, silently losing quals that must be enforced. This is a regression relative to the earlier behaviour in which baserestriction lists were not regenerated from the entries' security quals after join elimination. The two entries can differ because they are accessed on behalf of different roles, for example through views with different owners.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) An obvious alternative would be to skip self-join elimination for any range-table entry that has security quals. Why was that not chosen, and what was chosen instead?",
+  "key_files": [
+   "src/backend/optimizer/plan/analyzejoins.c"
+  ],
+  "key_points": [
+   {
+    "point": "The security quals are determined by which role is considered to access the table, so requiring equal checkAsUser values guarantees equal security quals; this is much cheaper than comparing the qual trees, which cannot be sorted for the preliminary sort step.",
+    "quote": "applicable RLS policies depends only on the role that is considered\nto be accessing the table, so that the securityQuals must be equal\nif the checkAsUser values are."
+   },
+   {
+    "point": "Refusing elimination whenever security quals are nonempty was rejected as too restrictive: such cases worked before and most mergeable entries share the same role.",
+    "quote": "(The first proposed solution was to not perform SJE at all on RTEs\nwith nonempty securityQuals, but that seems rather sad, especially\nsince such cases worked before 2ebf25e7d."
+   },
+   {
+    "point": "Entries with zero versus nonzero checkAsUser are intentionally not merged, so the plan need not be marked caller-dependent.",
+    "quote": "That's intentional so that SJE doesn't require having to mark\nthe plan as caller-dependent."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B2-08",
+  "subsystem": 4,
+  "commit": "708eb515812",
+  "date": "2026-11-02",
+  "type": "WHY",
+  "question": "A nested loop with a Memoize node on the inner side can return wrong results when an upper-level query parameter is buried inside a larger cache-key expression, for example a key like \"t2.hundred + t0.ten\", and the same parameter also appears in a filter elsewhere in the inner subplan (such as \"t1.twenty = t0.ten\"). Different (t2.hundred, t0.ten) pairs yield the same key value, so one cache entry serves both, while the filter selects different rows. Separately, an external (client-supplied) parameter in a cache key can stop the cache from being flushed when an unrelated executor parameter changes, because parameter numbering of the two kinds is unrelated.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/optimizer/path/joinpath.c",
+   "src/backend/optimizer/plan/createplan.c",
+   "src/backend/optimizer/util/clauses.c",
+   "src/include/nodes/execnodes.h",
+   "src/include/nodes/plannodes.h"
+  ],
+  "key_points": [
+   {
+    "point": "The set of parameters that do not trigger a cache purge was too broad: it included every parameter in the cache key expressions, which is only valid when the key values determine the parameter's value.",
+    "quote": "That assumption holds only when the\ncache key values determine the Param's value."
+   },
+   {
+    "point": "Now only parameters determined by the keys are exempt (nestloop params replacing outer Vars, and in binary mode a parameter that is a key by itself); any other parameter purges the cache when it changes, and the collector of parameter ids is restricted to executor parameters.",
+    "quote": "To fix, put into keyparamids only the Params whose values the cache\nkeys determine."
+   },
+   {
+    "point": "Because purging alone would empty the cache on every rescan, each buried parameter is also made a cache key by itself (switching to binary mode), unless its type cannot be hashed.",
+    "quote": "So also make each buried Param a cache key by itself,\nwhich puts Memoize into binary mode, so that cache entries survive\nacross rescans with the same Param value."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B2-09",
+  "subsystem": 5,
+  "commit": "ee7cfb99a34",
+  "date": "2026-11-05",
+  "type": "RISK",
+  "question": "SQL/JSON query functions (JSON_EXISTS, JSON_QUERY, JSON_VALUE) were added with ON EMPTY and ON ERROR behaviours. To avoid needless work, the expression compiler emits jumps that skip the jsonpath-evaluation step when the context item or the path expression is NULL, landing on a step that returns NULL. The evaluation step is also the place that sets up the per-row state of the expression.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/executor/execExpr.c",
+   "src/backend/executor/execExprInterp.c"
+  ],
+  "key_points": [
+   {
+    "point": "The skipped evaluation step was the only place resetting the per-row empty/error flags, so those flags kept the previous row's values for a NULL-input row.",
+    "quote": "Skipping it left the flags as the previous\nrow had set them"
+   },
+   {
+    "point": "Execution then fell through the ON EMPTY / ON ERROR steps, which returned the previous row's behaviour expression instead of NULL, so results depended on input row order.",
+    "quote": "a NULL-input row\nreturned the previous row's ON EMPTY / ON ERROR expression instead of\nNULL, making the result depend on the order of the input rows."
+   },
+   {
+    "point": "Only visible when those steps are emitted for NULL inputs (unless the behaviour is a NULL constant and RETURNING is not a domain); JSON_EXISTS with default FALSE ON ERROR was affected, JSON_VALUE and JSON_QUERY defaults were not.",
+    "quote": "So JSON_VALUE and JSON_QUERY\nwith their default NULL ON EMPTY / NULL ON ERROR behaviors were not\naffected, but JSON_EXISTS, whose default is FALSE ON ERROR, was."
+   }
+  ],
+  "intro_commit": "6185c9737cf"
+ },
+ {
+  "id": "B2-10",
+  "subsystem": 5,
+  "commit": "b715192e52e",
+  "date": "2026-11-05",
+  "type": "RISK",
+  "question": "Sort nodes were taught to use the cheaper Datum sort method instead of a full tuple sort whenever the Sort node outputs only a single column. The goal was a substantial speedup for single-column sorts, particularly for pass-by-value types. The condition used to enable it was whether the node's output has one column.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/executor/nodeSort.c"
+  ],
+  "key_points": [
+   {
+    "point": "The enabling condition checked only for one output column and ignored additional sort keys on that same column.",
+    "quote": "That commit mistakenly failed to consider additional\nsort keys."
+   },
+   {
+    "point": "Later keys can use a different collation; if the first key has a nondeterministic collation, ignoring subsequent keys gives a wrong ordering.",
+    "quote": "the collation for subsequent keys might differ from the first, and if the\nfirst sort key had a nondeterministic collation, ignoring subsequent keys\nisn't correct."
+   },
+   {
+    "point": "Observable through presorted-aggregate input, e.g. count(DISTINCT x COLLATE \"C\") GROUP BY x, which could return a count higher than the true number of distinct values.",
+    "quote": "This could lead to COUNT(DISTINCT) returning a count higher than the actual\nnumber of distinct values according to the \"C\" collation."
+   }
+  ],
+  "intro_commit": "91e9e89dccd"
+ },
+ {
+  "id": "B2-11",
+  "subsystem": 5,
+  "commit": "785dd853b6c",
+  "date": "2026-08-20",
+  "type": "ALT",
+  "question": "Several routines that fire queued AFTER-row and deferred-constraint actions bracket their firing loops with a depth counter that is incremented before and decremented after, without protection against errors. When a subtransaction (for instance a PL/pgSQL EXCEPTION block) catches an error raised while firing, the counter stays too high and the system wrongly believes such firing is active. A foreign-key fast path uses that knowledge to batch its checks. A later ALTER TABLE ... ADD FOREIGN KEY validated row by row can then be routed into batching that is never flushed, so a violating row goes unreported, the constraint is marked validated, and cached relations leak. Subtransaction end also unconditionally clears a callback list used by an enclosing firing loop.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) An obvious alternative would be to reset the depth counter to zero and clear the callback list at subtransaction end. Why was that not chosen, and what was done instead?",
+  "key_files": [
+   "src/backend/commands/trigger.c"
+  ],
+  "key_points": [
+   {
+    "point": "Fix saves the depth counter and the callback list at subtransaction start and restores them at subtransaction end, next to the existing query-depth handling.",
+    "quote": "Save firing_depth and firing_batch_callbacks at subtransaction start and\nrestore them in AfterTriggerEndSubXact(), next to the existing query_depth\nhandling."
+   },
+   {
+    "point": "Restoring (not zeroing or clearing) is required since a subtransaction can begin and end while an outer query is firing, when the depth is legitimately positive and callbacks may legitimately be set.",
+    "quote": "a subtransaction can begin and end while an outer query is firing, where\nfiring_depth is legitimately positive and firing_batch_callbacks may be\nlegitimately set."
+   }
+  ],
+  "intro_commit": null
+ },
+ {
+  "id": "B2-12",
+  "subsystem": 5,
+  "commit": "303c9b36205",
+  "date": "2026-11-02",
+  "type": "WHY",
+  "question": "A hashed SubPlan can appear more than once in a plan tree: for example when an equivalence class has a constant member containing it, in both the hash keys and hash clauses of a hash join, or after a restriction clause is copied out of an OR clause while the original stays. Each reference has its own execution state and hash tables but all share the subplan's plan state. When the subquery references outer query levels and those parameters change, queries return wrong results: only the first reference rebuilds its hash tables while the others keep probing tables built for earlier parameter values.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/executor/execAmi.c",
+   "src/backend/executor/nodeSubplan.c",
+   "src/include/nodes/execnodes.h"
+  ],
+  "key_points": [
+   {
+    "point": "Change detection relied on the shared subplan's changed-parameter set, but rebuilding the hash tables rescans the shared plan state and clears that set, hiding the change from the other references.",
+    "quote": "But buildSubPlanHash() rescans that PlanState, which\nclears its chgParam, so after one SubPlanState had rebuilt its hash\ntables, the others no longer saw the change"
+   },
+   {
+    "point": "Fix gives each SubPlanState its own stale flag: set on rescan alongside propagating changed params, tested before probing, cleared when the hash tables are rebuilt.",
+    "quote": "give each SubPlanState its own flag to mark its hash tables as\nstale."
+   },
+   {
+    "point": "The new field fits in existing struct padding, so struct size and offsets are unchanged (relevant to back-patching).",
+    "quote": "The new field fits into\nexisting padding in SubPlanState, so this does not change the struct's\nsize or the offsets of its other fields."
+   }
+  ],
+  "intro_commit": null
+ }
+]

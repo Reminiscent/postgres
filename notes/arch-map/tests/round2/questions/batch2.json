@@ -1,0 +1,237 @@
+[
+ {
+  "id": "R2-01",
+  "subsystem": 3,
+  "commit": "a8bb1a77795",
+  "date": "2026-09-19",
+  "type": "RISK",
+  "question": "A change reworked how the planner removes a provably useless LEFT JOIN. Previously the removal patched the planner's derived data structures in place, which left them subtly out of step with the rest of the planner and caused wrong answers in one reported bug. The new approach edits the query's join tree directly and then makes the planner re-derive everything from it. As part of this, the relation numbers of the removed join are scrubbed from the rest of the query tree by a generic variable-renumbering routine that is set to assert that the removed relation number appears in no field identifying a single relation. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/rewrite/rewriteManip.c"
+  ],
+  "key_points": [
+   {
+    "point": "When a join has an alias, Vars referenced through the alias carry the join's RT index as their syntactic referent even though their varno points at a base relation, so the renumbering assertion fires (or the field is silently set to invalid in non-assert builds).",
+    "quote": "When a join has an alias, the parser marks every Var referenced\nthrough that alias with the join's RT index as its syntactic referent"
+   },
+   {
+    "point": "The fix leaves the syntactic-referent field untouched when deleting a relid, because the join's RTE stays in the rangetable and such references remain valid.",
+    "quote": "Such syntactic references are still valid after the removal: the join\nis only taken out of the jointree, and its RTE remains in the\nrangetable through to the finished plan."
+   }
+  ],
+  "intro_commit": "2ebf25e7d70",
+  "family": "I6",
+  "family_reason": "Join removal rewrites the query tree and must leave an equivalent query; stripping valid alias references breaks that transformation."
+ },
+ {
+  "id": "R2-02",
+  "subsystem": 3,
+  "commit": "f4c850d11af",
+  "date": "2026-07-27",
+  "type": "RISK",
+  "question": "SQL/JSON's JSON_ARRAY(subquery) is required by the standard to return an empty JSON array when the subquery returns no rows, but the parser used to rewrite it into an aggregate that yields NULL over an empty set, and that early rewrite also baked implementation details into stored view definitions so the original syntax could not be shown when dumping views. A change introduced a dedicated constructor kind that keeps the original transformed subquery alongside the executable form (an aggregate wrapped in COALESCE), so that view deparsing can reproduce the original syntax, while the planner substitutes the executable form. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/parser/parse_expr.c",
+   "src/backend/utils/adt/ruleutils.c",
+   "src/include/catalog/catversion.h",
+   "src/include/nodes/primnodes.h"
+  ],
+  "key_points": [
+   {
+    "point": "The optional FORMAT clause on the subquery argument was recorded only in the executable expression, which view deparsing never inspects, so a stored view silently loses it.",
+    "quote": "The format was recorded only in\nthe executable expression kept in the func field, which ruleutils.c\ndoes not inspect, so it is silently dropped."
+   },
+   {
+    "point": "This changes semantics, not just appearance: with FORMAT JSON a text value is treated as already-formatted JSON rather than a string to be quoted.",
+    "quote": "This is more than cosmetic, because FORMAT JSON changes the result:\nwithout it a text value is treated as a string to be quoted, while\nwith it the value is treated as already-formatted JSON."
+   },
+   {
+    "point": "The fix stores the input FORMAT in a new deparse-only node field and emits it when deparsing, requiring a catalog version bump since stored rules change.",
+    "quote": "To fix, record the input FORMAT in a new deparse-only field of\nJsonConstructorExpr, alongside orig_query, and emit it in ruleutils.c."
+   }
+  ],
+  "intro_commit": "8d829f5a020",
+  "family": "I6",
+  "family_reason": "A stored view's deparsed definition no longer means the same thing as the original query, so the transformation changes results."
+ },
+ {
+  "id": "R2-03",
+  "subsystem": 3,
+  "commit": "dfce19c2300",
+  "date": "2026-07-10",
+  "type": "RISK",
+  "question": "A new SQL extension was added: UPDATE and DELETE can take a FOR PORTION OF clause on a range or multirange column to perform a temporal update or delete. If a row's time range partly falls outside the targeted bounds, the command truncates the row and inserts one or more new rows (temporal leftovers) holding the untouched parts. The feature was implemented with new grammar, new executor logic to insert the leftovers, documentation and tests. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/rewrite/rewriteHandler.c"
+  ],
+  "key_points": [
+   {
+    "point": "Using FOR PORTION OF against a view that has INSTEAD OF triggers crashed, because the feature's executor/leftover logic did not account for that combination.",
+    "quote": "Previously, an attempt to use these features together caused a crash."
+   },
+   {
+    "point": "The fix is to reject the combination, and the check belongs in the rewriter (where view handling happens), not in the parser.",
+    "quote": "Tests are added also to show that the check for this should be in the\nrewriter, not the parser, as an earlier patch version suggested."
+   }
+  ],
+  "intro_commit": "8e72d914c52",
+  "family": "none",
+  "family_reason": "A crash from an unsupported feature combination does not fall under a single listed invariant family."
+ },
+ {
+  "id": "R2-04",
+  "subsystem": 4,
+  "commit": "d6eac691747",
+  "date": "2026-07-31",
+  "type": "RISK",
+  "question": "A change made Result plan nodes record which relations they stand in for and why they were inserted, so that tools inspecting a plan tree (for example EXPLAIN, which gained a line describing what a Result replaces) can understand the origin of every Result. Plan creation already contained logic that merges a Result node sitting directly on another Result node into one. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/optimizer/plan/createplan.c"
+  ],
+  "key_points": [
+   {
+    "point": "The change broke the pre-merge checks for subplans and gating quals on the nested Result node.",
+    "quote": "That commit failed to\nmaintain the logic that checks for subplans and gating quals from the\nnested Result node before flattening"
+   },
+   {
+    "point": "Flattening a nested Result that carried a gating qual or subplan loses them, which can produce incorrect query results.",
+    "quote": "that could result in the nested\ngating qual and subplan being lost, which could produce incorrect results."
+   }
+  ],
+  "intro_commit": "f2bae51dfd5",
+  "family": "I6",
+  "family_reason": "A plan-tree transformation drops conditions and so changes query results."
+ },
+ {
+  "id": "R2-05",
+  "subsystem": 4,
+  "commit": "f5635c2786a",
+  "date": "2026-10-10",
+  "type": "RISK",
+  "question": "The planner has a helper that decides whether an expression can never yield NULL, used to simplify IS NULL tests, to turn COUNT(expr) into COUNT(*), and similar. A change extended it beyond constants and plain column references to many more expression node types, enabling several downstream simplifications. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/optimizer/util/clauses.c"
+  ],
+  "key_points": [
+   {
+    "point": "Treating IS DISTINCT FROM as never returning NULL is wrong: when neither input is NULL the result is NULL if the underlying equality operator returns NULL, which nothing forbids.",
+    "quote": "That is wrong: when neither input is NULL,\nthe result is NULL if the underlying equality operator returns NULL,\nwhich nothing forbids."
+   },
+   {
+    "point": "This led to wrong query results, and the fix simply removes that expression type from the non-nullable logic.",
+    "quote": "This could lead to wrong query results.\n\nTo fix, remove the DistinctExpr case, along with its test case."
+   }
+  ],
+  "intro_commit": "c8d2f68cc80",
+  "family": "I6",
+  "family_reason": "An unsound nullability proof lets the planner simplify a qual into something that gives different results."
+ },
+ {
+  "id": "R2-06",
+  "subsystem": 4,
+  "commit": "23e7ca78a00",
+  "date": "2026-10-17",
+  "type": "RISK",
+  "question": "When the planner builds the child relations of a UNION ALL or inheritance parent, it translates the parent's join conditions to each child. This translation cannot attach outer-join null-marking information to an expression that is not a simple column reference. A workaround was added so that conditions originating from above an outer join that can null the parent relation are filtered out while constructing each child's list of join conditions, since they are of no use for building paths for the child anyway. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/optimizer/path/allpaths.c"
+  ],
+  "key_points": [
+   {
+    "point": "The workaround identified such conditions by the relations they reference, but a reference to the parent that appears only inside a PlaceHolderVar is reported at the place the PHV is evaluated, so it was missed.",
+    "quote": "That misses a reference to the parent rel that is nulled by such an\nouter join but appears only within a PlaceHolderVar"
+   },
+   {
+    "point": "The missed condition reached the translation step and failed with an error when a UNION ALL member's output was not a plain column.",
+    "quote": "could then reach adjust_appendrel_attrs(), which failed with \"failed\nto apply nullingrels to a non-Var\" if the referenced output of a UNION\nALL member was not a plain Var."
+   },
+   {
+    "point": "The fix also skips conditions whose relids overlap the parent's lateral referencers, since such a reference is necessarily lateral and can never be enforced by a scan of the parent.",
+    "quote": "To fix, also skip quals whose clause_relids overlap the parent rel's\nlateral_referencers."
+   }
+  ],
+  "intro_commit": "767c598954b",
+  "family": "I6",
+  "family_reason": "A planner transformation of join conditions failed to handle a case, leading to an error instead of a valid plan."
+ },
+ {
+  "id": "R2-07",
+  "subsystem": 5,
+  "commit": "d1895a11c8f",
+  "date": "2026-09-09",
+  "type": "RISK",
+  "question": "COPY FROM in text and CSV format was sped up with SIMD instructions that skip over chunks of input containing no special characters. The previous code scanned one byte at a time. To avoid regressions, SIMD processing is switched off for the rest of the command once a short line or a special character (other than end-of-line) is met. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/commands/copyfromparse.c"
+  ],
+  "key_points": [
+   {
+    "point": "The SIMD path reads ahead whenever fewer than a vector's worth of bytes remain, even if those bytes already hold a complete end-of-copy marker.",
+    "quote": "The SIMD path for this command reads ahead via CopyLoadInputBuf()\nwhenever fewer than sizeof(Vector8) bytes remain in the input\nbuffer, even if those bytes hold a complete end-of-copy marker."
+   },
+   {
+    "point": "If the input is a pipe whose writer sent the marker but has not closed it, that read blocks forever, whereas the scalar loop asks only for the bytes it needs and stops at the marker.",
+    "quote": "If the input is a pipe whose writer has sent the marker but not\nclosed the pipe, that read blocks, and COPY waits for data it will\nnever use."
+   }
+  ],
+  "intro_commit": "e0a3a3fd536",
+  "family": "none",
+  "family_reason": "A hang waiting for data that will never arrive fits no listed invariant family."
+ },
+ {
+  "id": "R2-08",
+  "subsystem": 5,
+  "commit": "76e9e44b03a",
+  "date": "2026-11-04",
+  "type": "RISK",
+  "question": "Under SERIALIZABLE isolation, INSERT ... ON CONFLICT probes an arbiter index with a dirty snapshot, which predicate locking ignores, so a read of the conflicting row was never visible to serializable conflict detection and write skew could commit. A change fixed this by re-reading the conflicting tuple, right where the index probe finds it, using the statement's query snapshot, so that the table access method takes the predicate (SIREAD) lock and checks for concurrent writers under the buffer lock. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/executor/execIndexing.c"
+  ],
+  "key_points": [
+   {
+    "point": "The re-read happens whenever a conflicting tuple id is requested, but not every caller of the conflict-checking routine sets up the executor state's snapshot.",
+    "quote": "but not all callers of ExecCheckIndexConstraints() initialize\nestate->es_snapshot, and the re-fetch crashes if it's invalid."
+   },
+   {
+    "point": "In core this hits the logical replication apply worker, which logs conflicts using that routine without initializing a snapshot; extensions doing the same are also affected.",
+    "quote": "In core Postgres, this only affects the logical replication apply\nworker which, starting from v18, uses ExecCheckIndexConstraints() to\nlog conflicts"
+   },
+   {
+    "point": "The fix skips the re-read when the snapshot is invalid.",
+    "quote": "Fix by skipping the re-fetch in check_exclusion_or_unique_constraint()\nif the snapshot is invalid."
+   }
+  ],
+  "intro_commit": "fb60892f403",
+  "family": "I2",
+  "family_reason": "The fix reads a tuple with the query snapshot for serializable conflict tracking and crashes when no valid snapshot exists."
+ },
+ {
+  "id": "R2-09",
+  "subsystem": 5,
+  "commit": "f57df206814",
+  "date": "2026-08-07",
+  "type": "RISK",
+  "question": "An asynchronous Append (used with foreign-table subplans) assumes that, after the Append is rescanned, no asynchronous fetch requests remain pending for its subplans. A bug report showed an assertion failure and mis-rewinding of a remote cursor when a rescan happened with a request still pending. The fix made the foreign data wrapper drain any pending asynchronous request inside its own rescan callback, before restarting the scan. A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first. What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/executor/nodeAppend.c"
+  ],
+  "key_points": [
+   {
+    "point": "The FDW rescan callback is called only after the Append's rescan, or never at all, for subplans that are rescanned with changed parameters or pruned by runtime pruning, so a request can remain pending.",
+    "quote": "was made for a subplan that is re-scanned with parameter changes or\npruned in the next round by runtime pruning, the postgres_fdw callback\nfunction is called after ExecReScanAppend or never called, respectively."
+   },
+   {
+    "point": "A leftover pending request leads to incorrect results, an infinite loop or an assertion failure.",
+    "quote": "leading to incorrect results, an infinite loop, or an assertion failure."
+   },
+   {
+    "point": "The fix drains pending requests in the Append's rescan itself via the existing async wait/notify callbacks and removes the FDW-side change.",
+    "quote": "give the FDW a chance to drain that request using the existing\nForeignAsyncConfigureWait/ForeignAsyncNotify callback functions."
+   }
+  ],
+  "intro_commit": "9e283fc85d6",
+  "family": "I5",
+  "family_reason": "Pending asynchronous requests outlive the rescan that was supposed to clean them up."
+ }
+]

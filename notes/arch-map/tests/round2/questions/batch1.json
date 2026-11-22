@@ -1,0 +1,232 @@
+[
+ {
+  "id": "R1-01",
+  "subsystem": 1,
+  "commit": "42e96cf2fe09",
+  "date": "2026-10-01",
+  "type": "RISK",
+  "question": "An earlier change let the background table-maintenance workers (the ones that clean up dead rows automatically) use several helper processes for index work, as a manual cleanup command can. It added a cluster-wide cap on helpers per maintenance worker and a per-table storage parameter. Because a maintenance worker can receive a configuration reload mid-run and its cost-based throttling settings may then change, the coordinating process publishes its effective throttling parameters in a dynamic shared memory segment. Helper processes poll that segment at their throttling checkpoints and apply any new values locally.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/access/transam/parallel.c",
+   "src/backend/commands/vacuumparallel.c",
+   "src/backend/postmaster/autovacuum.c",
+   "src/include/commands/vacuum.h"
+  ],
+  "key_points": [
+   {
+    "point": "The coordinating process only propagated throttling-parameter changes from its throttling checkpoint, which it never reaches while blocked waiting for its helpers.",
+    "quote": "vacuum_delay_point(), which it no longer reaches once it is waiting in"
+   },
+   {
+    "point": "During that wait it neither processed config reloads nor noticed changes in the number of workers sharing the cost limit, so helpers ran with stale parameters until they finished.",
+    "quote": "processed a config reload nor noticed a change in the number of"
+   }
+  ],
+  "intro_commit": "1ff3180ca016",
+  "family": "none",
+  "family_reason": "Cost-throttling parameters shared between cooperating processes went stale; this is a stale shared-state bug that fits none of I1-I8 cleanly."
+ },
+ {
+  "id": "R1-02",
+  "subsystem": 1,
+  "commit": "c54b6979e033",
+  "date": "2026-08-28",
+  "type": "WHY",
+  "question": "PostgreSQL extensions can ask, after the server has started, for new shared memory areas by registering a set of initialization callbacks in an already-running backend. Suppose an error is raised inside one of those callbacks, or one of the allocations needed for the request fails. The backend survives the error (the session continues), but later behaves oddly. A second attempt to register such callbacks in the same session takes the wrong, postmaster-startup code path, trips assertion failures in other routines, or tries to process request records that were already freed.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/storage/ipc/shmem.c"
+  ],
+  "key_points": [
+   {
+    "point": "The failed registration left the backend's request-state variable in the wrong value, so the next call chose the postmaster-startup path.",
+    "quote": "'shmem_request_state' was left in wrong state, causing a subsequent"
+   },
+   {
+    "point": "The list of pending requests was not cleaned up, so a later call processed stale, already-freed entries.",
+    "quote": "'pending_shmem_requests' list was not properly cleaned"
+   },
+   {
+    "point": "The fix wraps the work in a PG_TRY block that restores that state on error.",
+    "quote": "To fix, add a PG_TRY() block to clean those things up on error."
+   }
+  ],
+  "intro_commit": null,
+  "family": "I5",
+  "family_reason": "State and a pending-request list were not cleaned up on the error path, leaving dangling freed entries."
+ },
+ {
+  "id": "R1-03",
+  "subsystem": 1,
+  "commit": "311df1dc0392",
+  "date": "2026-09-18",
+  "type": "WHY",
+  "question": "The shared-memory request API lets a caller ask to attach to an existing shared structure whose size it does not know, using a special 'unknown size' marker in place of a size. If the structure does not exist, the request should simply fail. Instead, when such a request is processed after server startup and the structure is missing, the system goes ahead and tries to create it using the marker value, which is -1, as the size. The size arithmetic during allocation then overflows, and the result is memory corruption.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/storage/ipc/shmem.c"
+  ],
+  "key_points": [
+   {
+    "point": "Requests using the unknown-size marker are rejected when the structure does not exist, rather than falling through to creation.",
+    "quote": "Fix by rejecting requests with SHMEM_ATTACH_UNKNOWN_SIZE when the"
+   },
+   {
+    "point": "A defensive integer-overflow check is also added in the low-level allocator so that any similarly bogus or oversized request cannot corrupt memory.",
+    "quote": "Also add an integer overflow check in\nShmemAllocRaw(), to protect from this kind of confusion or simply too\nlarge requests."
+   }
+  ],
+  "intro_commit": null,
+  "family": "I5",
+  "family_reason": "A negative size reached the shared-memory allocator, overflowing size arithmetic and corrupting memory (memory-safety/lifecycle bug)."
+ },
+ {
+  "id": "R1-04",
+  "subsystem": 2,
+  "commit": "dfd7ede529f2",
+  "date": "2026-10-25",
+  "type": "RISK",
+  "question": "An earlier change reworked LISTEN/NOTIFY so that a shared hash table tracks which sessions listen on which channels, letting a notifying session wake only interested listeners. As part of that, the SQL-callable set-returning function that lists the channels the current session listens on was changed to walk this hash table, keeping the table scan open across successive calls of the function and returning one channel per call.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/commands/async.c"
+  ],
+  "key_points": [
+   {
+    "point": "A scan left open across calls of a set-returning function is not finished if the executor stops fetching early, such as under LIMIT.",
+    "quote": "executor stops fetching rows early, as with a target-list call under"
+   },
+   {
+    "point": "The unfinished scan stays registered until transaction end, producing leak complaints and eventually a PANIC.",
+    "quote": "LIMIT, the scan remains registered until transaction end, resulting in\nleak complaints and eventually a PANIC."
+   }
+  ],
+  "intro_commit": "282b1cde9ded",
+  "family": "I5",
+  "family_reason": "A hash scan was leaked when the set-returning function was abandoned early, a resource-lifecycle failure."
+ },
+ {
+  "id": "R1-05",
+  "subsystem": 2,
+  "commit": "5b23669ea344",
+  "date": "2026-11-09",
+  "type": "WHY",
+  "question": "Between the moment a cursor-like portal object is created and the moment it is started, planning and executor startup can run user-defined code, for example an SQL-language function invoked while the query is planned. Such a function can issue a command that closes a portal by name, including the very portal that is currently being set up. The portal memory is then freed without the code that created the portal knowing, so when that creator continues to use the portal it touches freed memory.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/tcop/postgres.c",
+   "src/backend/utils/mmgr/portalmem.c"
+  ],
+  "key_points": [
+   {
+    "point": "Dropping a portal that is merely created or defined but not yet started is now refused, and CLOSE ALL skips such portals just as it skips active ones.",
+    "quote": "PortalDrop() now refuses to act on portals marked as"
+   },
+   {
+    "point": "Abort handling (transaction and subtransaction) puts such not-yet-started portals into a failed state so they can be cleaned up during error cleanup.",
+    "quote": "now puts such\nportals in a failed state so as they can be cleaned up during error\ncleanup."
+   }
+  ],
+  "intro_commit": null,
+  "family": "I5",
+  "family_reason": "A portal was freed while its creator still held a pointer to it, a use-after-free."
+ },
+ {
+  "id": "R1-06",
+  "subsystem": 2,
+  "commit": "ffca23839cca",
+  "date": "2026-08-10",
+  "type": "WHY",
+  "question": "Row-level security policies can refer to the current user and to role membership. A prepared statement, or a cached plan inside PL/pgSQL, may have been planned with the effect of such a policy already folded in. Now an administrator changes a role's membership or attributes, or changes the owner of a database. Sessions that already hold cached plans keep using them, and the policy behaviour they enforce no longer matches what the new role configuration should give. The plan cache does not notice that anything relevant changed.\n\n(a) Which source files under src/backend does the fix modify? List up to 5, most likely first.\n(b) What form does the fix take, and what constraint or reasoning drives that design?",
+  "key_files": [
+   "src/backend/utils/adt/acl.c",
+   "src/backend/utils/cache/plancache.c",
+   "src/include/utils/acl.h"
+  ],
+  "key_points": [
+   {
+    "point": "Role membership, role attribute and database-ownership changes can alter row-level-security behaviour, but the plan cache took no notice of them.",
+    "quote": "Role membership, role attribute, and database ownership changes may"
+   },
+   {
+    "point": "The fix registers catalog-change callbacks on the role-membership, role and database catalogs that invalidate the role-dependent plans.",
+    "quote": "syscache callbacks on pg_auth_members, pg_authid, and pg_database"
+   },
+   {
+    "point": "Changes to rows of other databases in the database catalog are ignored.",
+    "quote": "that invalidate the role-dependent plans.  Changes to other\ndatabases' pg_database rows are ignored."
+   }
+  ],
+  "intro_commit": null,
+  "family": "I4",
+  "family_reason": "Cached plans were not invalidated when role/ownership catalog state changed, leaving stale plans."
+ },
+ {
+  "id": "R1-07",
+  "subsystem": 12,
+  "commit": "e7ef2cf256cc",
+  "date": "2026-10-05",
+  "type": "RISK",
+  "question": "A change in PostgreSQL 13 made the heavyweight lock used when extending a relation conflict even among members of the same parallel lock group (a leader and its parallel workers), because two related processes extending the same relation at once is no safer than two unrelated ones. Previously, members of a lock group never blocked each other. The motivation was to open the door to parallel INSERT and COPY style operations.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/utils/adt/lockfuncs.c"
+  ],
+  "key_points": [
+   {
+    "point": "The blocking-pids reporting function assumes members of the same lock group never block each other, which stopped being true for relation extension locks.",
+    "quote": "pg_blocking_pids() assumes that members of the same lock group"
+   },
+   {
+    "point": "The function must now report lock group members as blockers for relation extension locks, so its result may include the blocked session's own PID since workers are reported by their leader's PID.",
+    "quote": "Since parallel workers are reported with their leader's PID, the\nresult may now include the blocked session's own PID."
+   }
+  ],
+  "intro_commit": "85f6b49c2c53",
+  "family": "I3",
+  "family_reason": "Lock-conflict semantics for a lock group changed without updating the blocker-reporting logic."
+ },
+ {
+  "id": "R1-08",
+  "subsystem": 12,
+  "commit": "4069df21beb8",
+  "date": "2026-08-07",
+  "type": "RISK",
+  "question": "A fix to the cumulative statistics system dealt with out-of-memory failures while creating a new statistics entry. A new entry is created in two steps: it is inserted in the shared hash table, then its fields are initialised, which includes a shared-memory allocation. If that allocation fails, the entry would be left half-built in the shared table and crash other backends. The change made the allocation return failure instead of throwing, so the creating backend can clean up the shared table before raising the error.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/utils/activity/pgstat_shmem.c"
+  ],
+  "key_points": [
+   {
+    "point": "The cleanup removed the shared hash entry but forgot the backend's own local reference, which had already been inserted in the local lookup table.",
+    "quote": "pgstat_get_entry_ref() cleaned up the shared hashtable but forgot to"
+   },
+   {
+    "point": "The stale local entry points to a NULL shared stats body, so a later garbage-collection pass over local references would crash on a pointer dereference.",
+    "quote": "entry whose entry_ref points to a NULL shared_stats.  If"
+   }
+  ],
+  "intro_commit": "8191e0c16a03",
+  "family": "I5",
+  "family_reason": "Error-path cleanup missed a local cache reference, leaving a dangling entry that crashes later."
+ },
+ {
+  "id": "R1-09",
+  "subsystem": 12,
+  "commit": "0d110901f0ef",
+  "date": "2026-10-15",
+  "type": "RISK",
+  "question": "A change to the cumulative statistics system let a variable-numbered stats kind, typically a custom kind from an extension, keep its entries in its own dedicated shared hash table with its own memory area, rather than the one shared table used by all kinds. At server startup and attach time, each registered kind is mapped to either the shared table or its dedicated one. Fixed-size kinds cannot use the option and have neither a hash table nor a memory area.\n\n(a) A follow-up fix was needed. Which source files under src/backend did the follow-up fix modify? List up to 5, most likely first.\n(b) What did the original change overlook: what breaks, under what conditions, and which correctness property is violated?",
+  "key_files": [
+   "src/backend/utils/activity/pgstat.c"
+  ],
+  "key_points": [
+   {
+    "point": "Reading the stats file at startup never checked that the kind of a hash-style entry is variable-sized.",
+    "quote": "has never checked that the kind of a hash entry"
+   },
+   {
+    "point": "If a kind ID is reused across restarts with different preloaded libraries, an entry written for a hashed kind can be read back against a fixed-size kind, whose hash and memory-area references are NULL, causing a NULL pointer dereference.",
+    "quote": "Fixed-sized stats\nkinds have no hash table and no DSA area, hence their dsa references in\npgStatLocal.kind_hash[] are NULL."
+   }
+  ],
+  "intro_commit": "44539786b829",
+  "family": "I7",
+  "family_reason": "Server crashes at startup when reading a stats file written under a different kind registration."
+ }
+]
